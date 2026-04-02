@@ -1,5 +1,5 @@
 // vite-plugin-webext — type augmentation
-// Add this file to your tsconfig "include" or use /// <reference types="vite-plugin-webext/types" />
+// Add this file to your tsconfig "include" or use /// <reference types="@taisan11/vite-plugin-webext/types" />
 
 /// <reference types="@types/chrome" />
 

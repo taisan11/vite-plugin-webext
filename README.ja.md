@@ -1,6 +1,6 @@
 # vite-plugin-webext
 
-`vite-plugin-webext` is a Vite plugin for cross-browser WebExtension builds.
+`@taisan11/vite-plugin-webext` is a Vite plugin for cross-browser WebExtension builds.
 
 It supports:
 
@@ -13,7 +13,7 @@ It supports:
 ## Install
 
 ```bash
-bun add vite-plugin-webext
+bun add @taisan11/vite-plugin-webext
 ```
 
 ## Build this package with tsdown
@@ -41,7 +41,7 @@ If `webext({ browser })` is also set, mode value takes precedence.
 
 ```ts
 import { defineConfig } from 'vite'
-import { webext } from 'vite-plugin-webext'
+import { webext } from '@taisan11/vite-plugin-webext'
 
 export default defineConfig({
   plugins: [
@@ -69,7 +69,7 @@ For multi-entry extension builds, set input via `build.rolldownOptions.input`:
 ```ts
 import { defineConfig } from 'vite'
 import { resolve } from 'node:path'
-import { webext } from 'vite-plugin-webext'
+import { webext } from '@taisan11/vite-plugin-webext'
 
 export default defineConfig({
   plugins: [webext({ manifest: (browser) => ({ manifest_version: 3, name: browser, version: '1.0.0' }) })],

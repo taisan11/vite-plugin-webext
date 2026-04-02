@@ -1,6 +1,6 @@
 # vite-plugin-webext
 
-`vite-plugin-webext` は、WebExtension をクロスブラウザ（Chrome / Firefox）でビルドするための Vite プラグインです。
+`@taisan11/vite-plugin-webext` は、WebExtension をクロスブラウザ（Chrome / Firefox）でビルドするための Vite プラグインです。
 
 主な機能:
 
@@ -13,7 +13,7 @@
 ## インストール
 
 ```bash
-bun add vite-plugin-webext
+bun add @taisan11/vite-plugin-webext
 ```
 
 ## このパッケージのビルド（tsdown）
@@ -39,7 +39,7 @@ vite build --mode firefox
 
 ```ts
 import { defineConfig } from 'vite'
-import { webext } from 'vite-plugin-webext'
+import { webext } from '@taisan11/vite-plugin-webext'
 
 export default defineConfig({
   plugins: [
@@ -67,7 +67,7 @@ export default defineConfig({
 ```ts
 import { defineConfig } from 'vite'
 import { resolve } from 'node:path'
-import { webext } from 'vite-plugin-webext'
+import { webext } from '@taisan11/vite-plugin-webext'
 
 export default defineConfig({
   plugins: [webext({ manifest: (browser) => ({ manifest_version: 3, name: browser, version: '1.0.0' }) })],

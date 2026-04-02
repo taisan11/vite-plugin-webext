@@ -1,12 +1,12 @@
 {
-  "name": "vite-plugin-webext",
+  "name": "@taisan11/vite-plugin-webext",
   "version": "0.1.0",
   "description": "Vite plugin for cross-browser web extension builds",
   "module": "./dist/index.mjs",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
   "type": "module",
-  "private": true,
+  "private": false,
   "files": [
     "dist"
   ],
@@ -16,7 +16,11 @@
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
     },
-    "./types": "./dist/index.d.mts"
+    "./types": "./dist/index.d.mts",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "build": "tsdown --dts",
