@@ -159,14 +159,21 @@ function webext(options) {
 			if (id !== RESOLVED_ID) return;
 			return generateShim(requireBrowser(activeBrowser));
 		},
-		generateBundle(_, bundle) {
-			if (!manifest || !resolvedManifest) return;
-			if (bundle["manifest.json"]) this.error("[vite-plugin-webext] `manifest.json` already exists in build output. Remove the duplicate or omit `webext({ manifest })`.");
-			this.emitFile({
-				type: "asset",
-				fileName: "manifest.json",
-				source: `${JSON.stringify(resolvedManifest, null, 2)}\n`
-			});
+		generateBundle: {
+			order: "post",
+			handler(_, bundle) {
+				if (!manifest || !resolvedManifest) return;
+				const outputBundle = bundle;
+				rewriteSourcePrefixedBundlePaths(outputBundle);
+				if (outputBundle["manifest.json"]) this.error("[vite-plugin-webext] `manifest.json` already exists in build output. Remove the duplicate or omit `webext({ manifest })`.");
+				const manifestWithResolvedPaths = resolveManifestPathsFromBundle(resolvedManifest, outputBundle, rootDir);
+				resolvedManifest = manifestWithResolvedPaths;
+				this.emitFile({
+					type: "asset",
+					fileName: "manifest.json",
+					source: `${JSON.stringify(manifestWithResolvedPaths, null, 2)}\n`
+				});
+			}
 		},
 		transform(code, id) {
 			if (id.includes("node_modules")) return null;
@@ -239,6 +246,99 @@ function escapeRe(s) {
 }
 function resolveManifest(manifest, browser) {
 	return typeof manifest === "function" ? manifest(browser) : manifest;
+}
+function rewriteSourcePrefixedBundlePaths(bundle) {
+	for (const output of Object.values(bundle)) output.fileName = stripLeadingSrcSegment(output.fileName);
+	const renameMap = /* @__PURE__ */ new Map();
+	for (const output of Object.values(bundle)) renameMap.set(normalizePath(output.fileName), output.fileName);
+	for (const output of Object.values(bundle)) {
+		if (output.type !== "chunk") continue;
+		output.imports = rewriteReferencedFiles(output.imports, renameMap);
+		output.dynamicImports = rewriteReferencedFiles(output.dynamicImports, renameMap);
+		output.implicitlyLoadedBefore = rewriteReferencedFiles(output.implicitlyLoadedBefore, renameMap);
+		output.referencedFiles = rewriteReferencedFiles(output.referencedFiles, renameMap);
+	}
+}
+function rewriteReferencedFiles(files, renameMap) {
+	if (!files) return [];
+	return files.map((fileName) => renameMap.get(normalizePath(fileName)) ?? fileName);
+}
+function stripLeadingSrcSegment(fileName) {
+	const normalized = normalizePath(fileName);
+	if (!normalized.startsWith("src/")) return normalized;
+	return normalized.slice(4);
+}
+function resolveManifestPathsFromBundle(manifest, bundle, rootDir) {
+	return rewriteManifestPathLikeStrings(manifest, buildSourceToOutputPathMap(bundle, rootDir));
+}
+function buildSourceToOutputPathMap(bundle, rootDir) {
+	const pathMap = /* @__PURE__ */ new Map();
+	for (const output of Object.values(bundle)) {
+		if (output.type === "chunk") {
+			registerChunkPath(pathMap, output, rootDir);
+			continue;
+		}
+		registerAssetPaths(pathMap, output, rootDir);
+	}
+	return pathMap;
+}
+function registerChunkPath(pathMap, chunk, rootDir) {
+	if (!chunk.isEntry || !chunk.facadeModuleId) return;
+	const relativeSourcePath = normalizeSourcePath(path.relative(rootDir, chunk.facadeModuleId));
+	if (!relativeSourcePath || relativeSourcePath.startsWith("../")) return;
+	if (relativeSourcePath.endsWith(".html")) return;
+	setPathMapping(pathMap, relativeSourcePath, chunk.fileName);
+}
+function registerAssetPaths(pathMap, asset, rootDir) {
+	for (const originalFileName of getAssetOriginalFileNames(asset)) {
+		const relativeSourcePath = normalizeSourcePath(path.isAbsolute(originalFileName) ? path.relative(rootDir, originalFileName) : originalFileName);
+		if (!relativeSourcePath || relativeSourcePath.startsWith("../")) continue;
+		setPathMapping(pathMap, relativeSourcePath, asset.fileName);
+	}
+}
+function getAssetOriginalFileNames(asset) {
+	const names = [];
+	if (Array.isArray(asset.originalFileNames)) names.push(...asset.originalFileNames);
+	if (typeof asset.originalFileName === "string") names.push(asset.originalFileName);
+	return names;
+}
+function setPathMapping(pathMap, sourcePath, outputPath) {
+	const normalizedSource = normalizeSourcePath(sourcePath);
+	const normalizedOutput = normalizePath(outputPath);
+	if (!normalizedSource) return;
+	pathMap.set(normalizedSource, normalizedOutput);
+	if (normalizedSource.startsWith("src/")) pathMap.set(normalizedSource.slice(4), normalizedOutput);
+}
+function rewriteManifestPathLikeStrings(manifest, sourceToOutput) {
+	return rewriteManifestValue(JSON.parse(JSON.stringify(manifest)), sourceToOutput);
+}
+function rewriteManifestValue(value, sourceToOutput) {
+	if (Array.isArray(value)) return value.map((entry) => rewriteManifestValue(entry, sourceToOutput));
+	if (value && typeof value === "object") {
+		const result = {};
+		for (const [key, childValue] of Object.entries(value)) result[key] = rewriteManifestValue(childValue, sourceToOutput);
+		return result;
+	}
+	if (typeof value === "string") return rewriteManifestPath(value, sourceToOutput);
+	return value;
+}
+function rewriteManifestPath(value, sourceToOutput) {
+	if (isExternalSpecifier(value)) return value;
+	const normalized = normalizeSourcePath(value);
+	if (!normalized) return value;
+	const mapped = sourceToOutput.get(normalized);
+	if (mapped) return mapped;
+	if (normalized.startsWith("src/")) return normalized.slice(4);
+	return value;
+}
+function isExternalSpecifier(value) {
+	return /^[A-Za-z][A-Za-z\d+\-.]*:/.test(value) || value.startsWith("//");
+}
+function normalizeSourcePath(filePath) {
+	return normalizePath(filePath).replace(/^\.\/+/, "").replace(/^\/+/, "");
+}
+function normalizePath(filePath) {
+	return filePath.split(path.sep).join("/");
 }
 function rewriteApiNamespacesToBrowser(code, parse) {
 	const ast = parse(code);
@@ -353,7 +453,7 @@ function shouldIncludeSourceEntry(relativePath) {
 	return !relativePath.split(path.sep).some((segment) => segment === "node_modules" || segment === "dist" || segment === ".git" || segment === ".copilot");
 }
 function toPosixPath(filePath) {
-	return filePath.split(path.sep).join("/");
+	return normalizePath(filePath);
 }
 //#endregion
 export { webext };

@@ -103,20 +103,33 @@ export function webext(options: WebExtOptions): Plugin {
       return generateShim(requireBrowser(activeBrowser))
     },
 
-    generateBundle(_, bundle) {
-      if (!manifest || !resolvedManifest) return
+    generateBundle: {
+      order: 'post',
+      handler(_, bundle) {
+        if (!manifest || !resolvedManifest) return
 
-      if (bundle['manifest.json']) {
-        this.error(
-          '[vite-plugin-webext] `manifest.json` already exists in build output. Remove the duplicate or omit `webext({ manifest })`.',
+        const outputBundle = bundle as OutputBundleLike
+        rewriteSourcePrefixedBundlePaths(outputBundle)
+
+        if (outputBundle['manifest.json']) {
+          this.error(
+            '[vite-plugin-webext] `manifest.json` already exists in build output. Remove the duplicate or omit `webext({ manifest })`.',
+          )
+        }
+
+        const manifestWithResolvedPaths = resolveManifestPathsFromBundle(
+          resolvedManifest,
+          outputBundle,
+          rootDir,
         )
-      }
+        resolvedManifest = manifestWithResolvedPaths
 
-      this.emitFile({
-        type: 'asset',
-        fileName: 'manifest.json',
-        source: `${JSON.stringify(resolvedManifest, null, 2)}\n`,
-      })
+        this.emitFile({
+          type: 'asset',
+          fileName: 'manifest.json',
+          source: `${JSON.stringify(manifestWithResolvedPaths, null, 2)}\n`,
+        })
+      },
     },
 
     transform(code, id) {
@@ -197,6 +210,29 @@ interface AstNode {
   [key: string]: unknown
 }
 
+interface BundleChunkLike {
+  type: 'chunk'
+  fileName: string
+  imports: string[]
+  dynamicImports: string[]
+  implicitlyLoadedBefore: string[]
+  referencedFiles: string[]
+  isEntry?: boolean
+  facadeModuleId?: string | null
+}
+
+interface BundleAssetLike {
+  type: 'asset'
+  fileName: string
+  originalFileNames?: string[]
+  originalFileName?: string
+  names?: string[]
+  name?: string
+}
+
+type BundleOutputLike = BundleChunkLike | BundleAssetLike
+type OutputBundleLike = Record<string, BundleOutputLike>
+
 function resolveConfiguredDefaultBrowser(
   browser?: BrowserTarget,
   defaultBrowser?: BrowserTarget,
@@ -247,6 +283,158 @@ function resolveManifest(
   browser: BrowserTarget,
 ): WebExtensionManifest {
   return typeof manifest === 'function' ? manifest(browser) : manifest
+}
+
+function rewriteSourcePrefixedBundlePaths(bundle: OutputBundleLike) {
+  for (const output of Object.values(bundle)) {
+    const newFileName = stripLeadingSrcSegment(output.fileName)
+    output.fileName = newFileName
+  }
+
+  const renameMap = new Map<string, string>()
+  for (const output of Object.values(bundle)) {
+    renameMap.set(normalizePath(output.fileName), output.fileName)
+  }
+
+  for (const output of Object.values(bundle)) {
+    if (output.type !== 'chunk') continue
+    output.imports = rewriteReferencedFiles(output.imports, renameMap)
+    output.dynamicImports = rewriteReferencedFiles(output.dynamicImports, renameMap)
+    output.implicitlyLoadedBefore = rewriteReferencedFiles(output.implicitlyLoadedBefore, renameMap)
+    output.referencedFiles = rewriteReferencedFiles(output.referencedFiles, renameMap)
+  }
+}
+
+function rewriteReferencedFiles(
+  files: string[] | undefined,
+  renameMap: Map<string, string>,
+): string[] {
+  if (!files) return []
+  return files.map((fileName) => renameMap.get(normalizePath(fileName)) ?? fileName)
+}
+
+function stripLeadingSrcSegment(fileName: string): string {
+  const normalized = normalizePath(fileName)
+  if (!normalized.startsWith('src/')) return normalized
+  return normalized.slice('src/'.length)
+}
+
+function resolveManifestPathsFromBundle(
+  manifest: WebExtensionManifest,
+  bundle: OutputBundleLike,
+  rootDir: string,
+): WebExtensionManifest {
+  const sourceToOutput = buildSourceToOutputPathMap(bundle, rootDir)
+  return rewriteManifestPathLikeStrings(manifest, sourceToOutput)
+}
+
+function buildSourceToOutputPathMap(bundle: OutputBundleLike, rootDir: string): Map<string, string> {
+  const pathMap = new Map<string, string>()
+
+  for (const output of Object.values(bundle)) {
+    if (output.type === 'chunk') {
+      registerChunkPath(pathMap, output, rootDir)
+      continue
+    }
+    registerAssetPaths(pathMap, output, rootDir)
+  }
+
+  return pathMap
+}
+
+function registerChunkPath(pathMap: Map<string, string>, chunk: BundleChunkLike, rootDir: string) {
+  if (!chunk.isEntry || !chunk.facadeModuleId) return
+  const relativeSourcePath = normalizeSourcePath(path.relative(rootDir, chunk.facadeModuleId))
+  if (!relativeSourcePath || relativeSourcePath.startsWith('../')) return
+  if (relativeSourcePath.endsWith('.html')) return
+  setPathMapping(pathMap, relativeSourcePath, chunk.fileName)
+}
+
+function registerAssetPaths(pathMap: Map<string, string>, asset: BundleAssetLike, rootDir: string) {
+  for (const originalFileName of getAssetOriginalFileNames(asset)) {
+    const relativeSourcePath = normalizeSourcePath(
+      path.isAbsolute(originalFileName) ? path.relative(rootDir, originalFileName) : originalFileName,
+    )
+    if (!relativeSourcePath || relativeSourcePath.startsWith('../')) continue
+    setPathMapping(pathMap, relativeSourcePath, asset.fileName)
+  }
+}
+
+function getAssetOriginalFileNames(asset: BundleAssetLike): string[] {
+  const names: string[] = []
+  if (Array.isArray(asset.originalFileNames)) {
+    names.push(...asset.originalFileNames)
+  }
+  if (typeof asset.originalFileName === 'string') {
+    names.push(asset.originalFileName)
+  }
+
+  return names
+}
+
+function setPathMapping(pathMap: Map<string, string>, sourcePath: string, outputPath: string) {
+  const normalizedSource = normalizeSourcePath(sourcePath)
+  const normalizedOutput = normalizePath(outputPath)
+  if (!normalizedSource) return
+
+  pathMap.set(normalizedSource, normalizedOutput)
+  if (normalizedSource.startsWith('src/')) {
+    pathMap.set(normalizedSource.slice('src/'.length), normalizedOutput)
+  }
+}
+
+function rewriteManifestPathLikeStrings(
+  manifest: WebExtensionManifest,
+  sourceToOutput: Map<string, string>,
+): WebExtensionManifest {
+  const cloned = JSON.parse(JSON.stringify(manifest)) as unknown
+  return rewriteManifestValue(cloned, sourceToOutput) as WebExtensionManifest
+}
+
+function rewriteManifestValue(value: unknown, sourceToOutput: Map<string, string>): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => rewriteManifestValue(entry, sourceToOutput))
+  }
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, childValue] of Object.entries(value)) {
+      result[key] = rewriteManifestValue(childValue, sourceToOutput)
+    }
+    return result
+  }
+  if (typeof value === 'string') {
+    return rewriteManifestPath(value, sourceToOutput)
+  }
+  return value
+}
+
+function rewriteManifestPath(value: string, sourceToOutput: Map<string, string>): string {
+  if (isExternalSpecifier(value)) return value
+
+  const normalized = normalizeSourcePath(value)
+  if (!normalized) return value
+
+  const mapped = sourceToOutput.get(normalized)
+  if (mapped) return mapped
+
+  if (normalized.startsWith('src/')) {
+    return normalized.slice('src/'.length)
+  }
+
+  return value
+}
+
+function isExternalSpecifier(value: string): boolean {
+  return /^[A-Za-z][A-Za-z\d+\-.]*:/.test(value) || value.startsWith('//')
+}
+
+function normalizeSourcePath(filePath: string): string {
+  const normalized = normalizePath(filePath)
+  return normalized.replace(/^\.\/+/, '').replace(/^\/+/, '')
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.split(path.sep).join('/')
 }
 
 function rewriteApiNamespacesToBrowser(
@@ -414,5 +602,5 @@ function shouldIncludeSourceEntry(relativePath: string): boolean {
 }
 
 function toPosixPath(filePath: string): string {
-  return filePath.split(path.sep).join('/')
+  return normalizePath(filePath)
 }
