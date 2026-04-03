@@ -5,6 +5,7 @@
 It supports:
 
 - Browser target resolution from `--mode` (`chrome` / `firefox`)
+- Configurable default browser when `--mode` is not set
 - Manifest generation from `vite.config.ts`
 - Static namespace rewrite with MagicString (`chrome.*` -> `browser.*`)
 - Browser-separated output directories
@@ -35,7 +36,19 @@ vite build --mode chrome
 vite build --mode firefox
 ```
 
-If `webext({ browser })` is also set, mode value takes precedence.
+If `webext({ defaultBrowser })` or `webext({ browser })` is also set, mode value takes precedence.
+
+## Default browser without `--mode`
+
+You can set a fallback browser when build mode is not `chrome` / `firefox`:
+
+```ts
+webext({
+  defaultBrowser: 'chrome',
+})
+```
+
+`browser` is still supported as a backward-compatible alias of `defaultBrowser`.
 
 ## Plugin usage
 
@@ -113,3 +126,5 @@ Example for chrome mode:
 - `dist/chrome-zip.zip`
 
 Set `zipArtifacts: false` to disable zip generation.
+
+If the browser output directory is missing (for example, `build.write: false`), dist zip generation is skipped with a warning instead of failing the build.

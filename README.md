@@ -5,6 +5,7 @@
 主な機能:
 
 - `--mode` (`chrome` / `firefox`) でターゲットブラウザを切り替え
+- `--mode` が未指定でもデフォルトターゲットブラウザを設定可能
 - `vite.config.ts` で定義した manifest の生成
 - MagicString による静的変換（`chrome.*` -> `browser.*`）
 - ブラウザごとの出力ディレクトリ分離
@@ -33,7 +34,19 @@ vite build --mode chrome
 vite build --mode firefox
 ```
 
-`webext({ browser })` を併用しても、`--mode` が優先されます。
+`webext({ defaultBrowser })` や `webext({ browser })` を併用しても、`--mode` が優先されます。
+
+## `--mode` 未指定時のデフォルトブラウザ
+
+`--mode` が `chrome` / `firefox` 以外の場合に使うデフォルトを指定できます。
+
+```ts
+webext({
+  defaultBrowser: 'chrome',
+})
+```
+
+`browser` は後方互換のため、`defaultBrowser` のエイリアスとして引き続き利用できます。
 
 ## 基本設定
 
@@ -111,3 +124,5 @@ Chrome の例:
 - `dist/chrome-zip.zip`
 
 `zipArtifacts: false` を指定すると zip 生成を無効化できます。
+
+ブラウザ別の出力ディレクトリが存在しない場合（例: `build.write: false`）は、dist zip 生成を警告付きでスキップし、ビルドを失敗させません。

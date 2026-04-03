@@ -499,8 +499,12 @@ type BrowserTarget = 'chrome' | 'firefox';
 type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest;
 interface WebExtOptions {
   /**
+   * Default browser target used when Vite mode is not `chrome` or `firefox`.
+   */
+  defaultBrowser?: BrowserTarget;
+  /**
    * Target browser for this build.
-   * When omitted, this plugin resolves from Vite mode (`--mode chrome|firefox`).
+   * Backward-compatible alias for `defaultBrowser`.
    */
   browser?: BrowserTarget;
   /**

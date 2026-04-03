@@ -120,7 +120,8 @@ export { _browser as browser }
 const VIRTUAL_ID = "virtual:webext/browser";
 const RESOLVED_ID = "\0virtual:webext/browser";
 function webext(options) {
-	const { browser, unavailableApi = "error", injectGlobals = true, manifest, zipArtifacts = true } = options;
+	const { defaultBrowser, browser, unavailableApi = "error", injectGlobals = true, manifest, zipArtifacts = true } = options;
+	const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser);
 	let activeBrowser = null;
 	let resolvedManifest = null;
 	let rootDir = process.cwd();
@@ -132,7 +133,7 @@ function webext(options) {
 		enforce: "pre",
 		config(userConfig, configEnv) {
 			isBuild = configEnv.command === "build";
-			activeBrowser = resolveBrowserTarget(configEnv.mode, browser);
+			activeBrowser = resolveBrowserTarget(configEnv.mode, configuredDefaultBrowser);
 			resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null;
 			const outDir = withBrowserSubDir(userConfig.build?.outDir ?? "dist", activeBrowser);
 			return {
@@ -146,7 +147,7 @@ function webext(options) {
 		},
 		configResolved(config) {
 			rootDir = config.root;
-			activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, browser);
+			activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser);
 			resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null;
 			browserOutDir = path.resolve(rootDir, config.build.outDir);
 			distRootDir = path.resolve(browserOutDir, "..");
@@ -198,16 +199,25 @@ function webext(options) {
 			const modeZipPath = path.join(distRootDir, `${currentBrowser}-zip.zip`);
 			await promises.mkdir(distRootDir, { recursive: true });
 			await createSourceZip(rootDir, sourceZipPath);
+			if (!await directoryExists(browserOutDir)) {
+				this.warn(`[vite-plugin-webext] Skipping dist zip artifacts because output directory "${browserOutDir}" does not exist. This can happen when \`build.write\` is disabled.`);
+				return;
+			}
 			await createDirectoryZip(browserOutDir, distZipPath);
 			await promises.copyFile(distZipPath, modeZipPath);
 		}
 	};
 }
+function resolveConfiguredDefaultBrowser(browser, defaultBrowser) {
+	if (!defaultBrowser) return browser;
+	if (!browser || browser === defaultBrowser) return defaultBrowser;
+	throw new Error("[vite-plugin-webext] `browser` and `defaultBrowser` are both set with different values. Use only one option, or set the same value for both.");
+}
 function resolveBrowserTarget(mode, configuredBrowser) {
 	const browserFromMode = parseBrowserMode(mode);
 	if (browserFromMode) return browserFromMode;
 	if (configuredBrowser) return configuredBrowser;
-	throw new Error("[vite-plugin-webext] Could not resolve browser target. Use `vite build --mode chrome|firefox` or pass `webext({ browser })`.");
+	throw new Error("[vite-plugin-webext] Could not resolve browser target. Use `vite build --mode chrome|firefox` or pass `webext({ defaultBrowser })` (or legacy `webext({ browser })`).");
 }
 function parseBrowserMode(mode) {
 	if (mode === "chrome" || mode === "firefox") return mode;
@@ -296,6 +306,14 @@ async function createSourceZip(rootDirectory, outputPath) {
 }
 async function createDirectoryZip(directory, outputPath) {
 	await writeZip(outputPath, await collectZipEntries(directory, directory, () => true));
+}
+async function directoryExists(directory) {
+	try {
+		return (await promises.stat(directory)).isDirectory();
+	} catch (error) {
+		if (error.code === "ENOENT") return false;
+		throw error;
+	}
 }
 async function collectZipEntries(rootDirectory, currentDirectory, shouldInclude) {
 	const results = [];

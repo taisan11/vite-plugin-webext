@@ -11,8 +11,12 @@ export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
 
 export interface WebExtOptions {
   /**
+   * Default browser target used when Vite mode is not `chrome` or `firefox`.
+   */
+  defaultBrowser?: BrowserTarget
+  /**
    * Target browser for this build.
-   * When omitted, this plugin resolves from Vite mode (`--mode chrome|firefox`).
+   * Backward-compatible alias for `defaultBrowser`.
    */
   browser?: BrowserTarget
   /**
@@ -44,12 +48,14 @@ const RESOLVED_ID = '\0virtual:webext/browser'
 
 export function webext(options: WebExtOptions): Plugin {
   const {
+    defaultBrowser,
     browser,
     unavailableApi = 'error',
     injectGlobals = true,
     manifest,
     zipArtifacts = true,
   } = options
+  const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser)
 
   let activeBrowser: BrowserTarget | null = null
   let resolvedManifest: WebExtensionManifest | null = null
@@ -64,7 +70,7 @@ export function webext(options: WebExtOptions): Plugin {
 
     config(userConfig, configEnv): UserConfig {
       isBuild = configEnv.command === 'build'
-      activeBrowser = resolveBrowserTarget(configEnv.mode, browser)
+      activeBrowser = resolveBrowserTarget(configEnv.mode, configuredDefaultBrowser)
       resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
       const outDir = withBrowserSubDir(userConfig.build?.outDir ?? 'dist', activeBrowser)
 
@@ -82,7 +88,7 @@ export function webext(options: WebExtOptions): Plugin {
 
     configResolved(config) {
       rootDir = config.root
-      activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, browser)
+      activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser)
       resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
       browserOutDir = path.resolve(rootDir, config.build.outDir)
       distRootDir = path.resolve(browserOutDir, '..')
@@ -168,6 +174,13 @@ export function webext(options: WebExtOptions): Plugin {
 
       await fs.mkdir(distRootDir, { recursive: true })
       await createSourceZip(rootDir, sourceZipPath)
+      const hasBrowserOutput = await directoryExists(browserOutDir)
+      if (!hasBrowserOutput) {
+        this.warn(
+          `[vite-plugin-webext] Skipping dist zip artifacts because output directory "${browserOutDir}" does not exist. This can happen when \`build.write\` is disabled.`,
+        )
+        return
+      }
       await createDirectoryZip(browserOutDir, distZipPath)
       await fs.copyFile(distZipPath, modeZipPath)
     },
@@ -184,12 +197,23 @@ interface AstNode {
   [key: string]: unknown
 }
 
+function resolveConfiguredDefaultBrowser(
+  browser?: BrowserTarget,
+  defaultBrowser?: BrowserTarget,
+): BrowserTarget | undefined {
+  if (!defaultBrowser) return browser
+  if (!browser || browser === defaultBrowser) return defaultBrowser
+  throw new Error(
+    '[vite-plugin-webext] `browser` and `defaultBrowser` are both set with different values. Use only one option, or set the same value for both.',
+  )
+}
+
 function resolveBrowserTarget(mode: string, configuredBrowser?: BrowserTarget): BrowserTarget {
   const browserFromMode = parseBrowserMode(mode)
   if (browserFromMode) return browserFromMode
   if (configuredBrowser) return configuredBrowser
   throw new Error(
-    '[vite-plugin-webext] Could not resolve browser target. Use `vite build --mode chrome|firefox` or pass `webext({ browser })`.',
+    '[vite-plugin-webext] Could not resolve browser target. Use `vite build --mode chrome|firefox` or pass `webext({ defaultBrowser })` (or legacy `webext({ browser })`).',
   )
 }
 
@@ -315,6 +339,17 @@ async function createSourceZip(rootDirectory: string, outputPath: string) {
 async function createDirectoryZip(directory: string, outputPath: string) {
   const entries = await collectZipEntries(directory, directory, () => true)
   await writeZip(outputPath, entries)
+}
+
+async function directoryExists(directory: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(directory)
+    return stat.isDirectory()
+  } catch (error) {
+    const maybeError = error as NodeJS.ErrnoException
+    if (maybeError.code === 'ENOENT') return false
+    throw error
+  }
 }
 
 async function collectZipEntries(
