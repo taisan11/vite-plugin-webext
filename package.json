@@ -8,7 +8,8 @@
   "type": "module",
   "private": false,
   "files": [
-    "dist"
+    "dist",
+    "!dist/index.mjs.map"
   ],
   "exports": {
     ".": {
@@ -18,9 +19,6 @@
     },
     "./types": "./dist/index.d.mts",
     "./package.json": "./package.json"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "build": "tsdown --dts",

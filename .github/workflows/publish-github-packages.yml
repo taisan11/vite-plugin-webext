@@ -1,41 +1,41 @@
-name: Publish to GitHub Packages
+# name: Publish to GitHub Packages
 
-on:
-  release:
-    types: [published]
-  workflow_dispatch:
+# on:
+#   release:
+#     types: [published]
+#   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
+# permissions:
+#   contents: read
+#   packages: write
 
-jobs:
-  publish:
-    runs-on: ubuntu-latest
+# jobs:
+#   publish:
+#     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+#       - name: Setup Bun
+#         uses: oven-sh/setup-bun@v2
+#         with:
+#           bun-version: latest
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://npm.pkg.github.com
-          scope: "@taisan11"
+#       - name: Setup Node.js
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 20
+#           registry-url: https://npm.pkg.github.com
+#           scope: "@taisan11"
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+#       - name: Install dependencies
+#         run: bun install --frozen-lockfile
 
-      - name: Build package
-        run: bun run build
+#       - name: Build package
+#         run: bun run build
 
-      - name: Publish package
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#       - name: Publish package
+#         run: npm publish
+#         env:
+#           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
