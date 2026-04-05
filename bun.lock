@@ -5,12 +5,13 @@
     "": {
       "name": "vite-plugin-webext",
       "dependencies": {
+        "@types/firefox-webext-browser": "^120.0.4",
+        "@zip.js/zip.js": "^2.8.23",
         "magic-string": "^0.30.21",
       },
       "devDependencies": {
         "@types/bun": "^1.3.11",
         "@types/chrome": "^0.1.38",
-        "@zip.js/zip.js": "^2.8.23",
         "tsdown": "^0.21.6",
         "vite": "^8.0.3",
       },
@@ -93,6 +94,8 @@
     "@types/filesystem": ["@types/filesystem@0.0.36", "", { "dependencies": { "@types/filewriter": "*" } }, "sha512-vPDXOZuannb9FZdxgHnqSwAG/jvdGM8Wq+6N4D/d80z+D4HWH+bItqsZaVRQykAn6WEVeEkLm2oQigyHtgb0RA=="],
 
     "@types/filewriter": ["@types/filewriter@0.0.33", "", {}, "sha512-xFU8ZXTw4gd358lb2jw25nxY9QAgqn2+bKKjKOYfNCzN4DKCFetK7sPtrlpg66Ywe3vWY9FNxprZawAh9wfJ3g=="],
+
+    "@types/firefox-webext-browser": ["@types/firefox-webext-browser@120.0.5", "", {}, "sha512-imn8ecga0HQWcOSvxy9i0lD+7vpHgkj1NVLvXS1lNHqHt03Z4QwazeEdoWe+C9JXpmVyKiRanb+z9D/w001tRg=="],
 
     "@types/har-format": ["@types/har-format@1.2.16", "", {}, "sha512-fluxdy7ryD3MV6h8pTfTYpy/xQzCFC7m89nOH9y94cNqJ1mDIDPut7MnRHI3F6qRmh/cT2fUjG1MLdCNb4hE9A=="],
 

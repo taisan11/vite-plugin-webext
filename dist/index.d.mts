@@ -515,8 +515,12 @@ interface WebExtOptions {
    */
   unavailableApi?: 'error' | 'warn' | 'ignore';
   /**
-   * Replace bare API namespace access to `browser.*` with static transforms.
+   * Statically rewrite extension API namespaces to the target browser namespace.
    * Default: true
+   */
+  staticTransform?: boolean;
+  /**
+   * Backward-compatible alias for `staticTransform`.
    */
   injectGlobals?: boolean;
   /**

@@ -7,7 +7,7 @@
 - `--mode` (`chrome` / `firefox`) でターゲットブラウザを切り替え
 - `--mode` が未指定でもデフォルトターゲットブラウザを設定可能
 - `vite.config.ts` で定義した manifest の生成
-- MagicString による静的変換（`chrome.*` -> `browser.*`）
+- MagicString による完全静的変換（`chrome` 出力は `chrome.*`、`firefox` 出力は `browser.*`）
 - ブラウザごとの出力ディレクトリ分離
 - `@zip.js/zip.js` を使った zip 生成
 
@@ -98,9 +98,24 @@ export default defineConfig({
 
 ## 静的変換ポリシー
 
-コード中の `chrome.*` は MagicString により `browser.*` へ静的変換され、変換件数を警告として出力します。
+拡張機能のコードは `browser.*` で統一して記述します。
 
-出力コードは `browser.*` に統一されます。
+ビルド時に MagicString で完全静的変換を行います。
+
+- `vite build --mode chrome` では `browser.*` / `chrome.*` を `chrome.*` へ統一
+- `vite build --mode firefox` では `browser.*` / `chrome.*` を `browser.*` へ統一
+
+ランタイム shim は注入しません。
+
+## `browser.*` の型を有効化する方法
+
+拡張機能側のプロジェクトに `src/env.d.ts` を作成し、次を追加してください。
+
+```ts
+/// <reference types="@taisan11/vite-plugin-webext/types" />
+```
+
+これで `browser.*` グローバルと `import.meta.env.BROWSER` / `IS_CHROME` / `IS_FIREFOX` に型が付きます。
 
 ## 出力ディレクトリ
 

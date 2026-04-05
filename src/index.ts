@@ -3,11 +3,11 @@ import path from 'node:path'
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from '@zip.js/zip.js'
 import MagicString from 'magic-string'
 import type { Plugin, UserConfig } from 'vite'
-import { CHROME_ONLY_APIS, FIREFOX_ONLY_APIS, generateShim } from './shim-gen.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
 export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
+type ApiNamespace = 'browser' | 'chrome'
 
 export interface WebExtOptions {
   /**
@@ -27,8 +27,12 @@ export interface WebExtOptions {
    */
   unavailableApi?: 'error' | 'warn' | 'ignore'
   /**
-   * Replace bare API namespace access to `browser.*` with static transforms.
+   * Statically rewrite extension API namespaces to the target browser namespace.
    * Default: true
+   */
+  staticTransform?: boolean
+  /**
+   * Backward-compatible alias for `staticTransform`.
    */
   injectGlobals?: boolean
   /**
@@ -43,19 +47,54 @@ export interface WebExtOptions {
   zipArtifacts?: boolean
 }
 
-const VIRTUAL_ID = 'virtual:webext/browser'
-const RESOLVED_ID = '\0virtual:webext/browser'
+const CHROME_ONLY_APIS = [
+  'offscreen',
+  'enterprise',
+  'documentScan',
+  'gcm',
+  'instanceID',
+  'loginState',
+  'platformKeys',
+  'printingMetrics',
+  'readingList',
+  'search',
+  'smartCardProviderPrivate',
+  'systemLog',
+  'topSites',
+  'ttsEngine',
+  'userScripts',
+  'vpnProvider',
+  'wallpaper',
+  'webAuthenticationProxy',
+] as const
+
+const FIREFOX_ONLY_APIS = [
+  'theme',
+  'browserSettings',
+  'captivePortal',
+  'dns',
+  'find',
+  'geckoProfiler',
+  'menus',
+  'normandyAddonStudy',
+  'pkcs11',
+  'proxy',
+  'telemetry',
+  'userScripts',
+] as const
 
 export function webext(options: WebExtOptions): Plugin {
   const {
     defaultBrowser,
     browser,
     unavailableApi = 'error',
-    injectGlobals = true,
+    staticTransform = true,
+    injectGlobals,
     manifest,
     zipArtifacts = true,
   } = options
   const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser)
+  const shouldTransformNamespaces = injectGlobals ?? staticTransform
 
   let activeBrowser: BrowserTarget | null = null
   let resolvedManifest: WebExtensionManifest | null = null
@@ -92,15 +131,6 @@ export function webext(options: WebExtOptions): Plugin {
       resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
       browserOutDir = path.resolve(rootDir, config.build.outDir)
       distRootDir = path.resolve(browserOutDir, '..')
-    },
-
-    resolveId(id) {
-      if (id === VIRTUAL_ID) return RESOLVED_ID
-    },
-
-    load(id) {
-      if (id !== RESOLVED_ID) return
-      return generateShim(requireBrowser(activeBrowser))
     },
 
     generateBundle: {
@@ -154,13 +184,14 @@ export function webext(options: WebExtOptions): Plugin {
         }
       }
 
-      if (!injectGlobals) return null
+      if (!shouldTransformNamespaces) return null
 
-      const rewritten = rewriteApiNamespacesToBrowser(code, (source) => this.parse(source))
+      const targetNamespace = resolveApiNamespace(currentBrowser)
+      const rewritten = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace)
       if (rewritten.count === 0) return null
 
       this.warn(
-        `[vite-plugin-webext] Rewrote ${rewritten.count} "chrome.*" reference(s) to "browser.*" in ${id}.`,
+        `[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
       )
 
       return {
@@ -437,9 +468,14 @@ function normalizePath(filePath: string): string {
   return filePath.split(path.sep).join('/')
 }
 
-function rewriteApiNamespacesToBrowser(
+function resolveApiNamespace(browser: BrowserTarget): ApiNamespace {
+  return browser === 'chrome' ? 'chrome' : 'browser'
+}
+
+function rewriteApiNamespaces(
   code: string,
   parse: (source: string) => unknown,
+  targetNamespace: ApiNamespace,
 ) {
   const ast = parse(code) as AstNode
   const magic = new MagicString(code)
@@ -453,11 +489,12 @@ function rewriteApiNamespacesToBrowser(
     const object = node.object as AstNode | undefined
     if (
       object?.type === 'Identifier' &&
-      object.name === 'chrome' &&
+      (object.name === 'chrome' || object.name === 'browser') &&
+      object.name !== targetNamespace &&
       typeof object.start === 'number' &&
       typeof object.end === 'number'
     ) {
-      magic.overwrite(object.start, object.end, 'browser')
+      magic.overwrite(object.start, object.end, targetNamespace)
       count++
     }
   })

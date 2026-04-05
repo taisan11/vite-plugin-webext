@@ -1,6 +1,6 @@
 {
   "name": "@taisan11/vite-plugin-webext",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Vite plugin for cross-browser web extension builds",
   "module": "./dist/index.mjs",
   "main": "./dist/index.mjs",
@@ -9,6 +9,7 @@
   "private": false,
   "files": [
     "dist",
+    "src/webext-types.d.ts",
     "!dist/index.mjs.map"
   ],
   "exports": {
@@ -17,7 +18,7 @@
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
     },
-    "./types": "./dist/index.d.mts",
+    "./types": "./src/webext-types.d.ts",
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -35,6 +36,7 @@
     "typescript": "^6.0.2"
   },
   "dependencies": {
+    "@types/firefox-webext-browser": "^120.0.4",
     "@zip.js/zip.js": "^2.8.23",
     "magic-string": "^0.30.21"
   }

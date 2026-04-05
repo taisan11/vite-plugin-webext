@@ -2,8 +2,7 @@ import { promises } from "node:fs";
 import path from "node:path";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import MagicString from "magic-string";
-//#region src/shim-gen.ts
-/** APIs that exist ONLY in Chrome (MV3+) */
+//#region src/index.ts
 const CHROME_ONLY_APIS = [
 	"offscreen",
 	"enterprise",
@@ -24,7 +23,6 @@ const CHROME_ONLY_APIS = [
 	"wallpaper",
 	"webAuthenticationProxy"
 ];
-/** APIs that exist ONLY in Firefox */
 const FIREFOX_ONLY_APIS = [
 	"theme",
 	"browserSettings",
@@ -39,89 +37,10 @@ const FIREFOX_ONLY_APIS = [
 	"telemetry",
 	"userScripts"
 ];
-/**
-* Generate the virtual module source.
-*
-* The shim:
-*  1. Picks the right global (`browser` for Firefox, `chrome` for Chrome)
-*  2. Wraps Chrome's callback-based APIs in Promises so callers can always await
-*  3. Assigns the result to both `globalThis.browser` and `globalThis.chrome`
-*     so existing code using either name works without changes
-*/
-function generateShim(browser) {
-	if (browser === "firefox") return `
-// vite-plugin-webext — Firefox shim
-// Firefox already exposes a promise-based \`browser\` global in extensions.
-// We just re-export it and also alias \`chrome\` for cross-browser code.
-
-const _browser = globalThis.browser ?? globalThis.chrome
-
-if (!globalThis.browser) globalThis.browser = _browser
-if (!globalThis.chrome)  globalThis.chrome  = _browser
-
-export default _browser
-export { _browser as browser }
-`.trimStart();
-	return `
-// vite-plugin-webext — Chrome shim
-// Wraps chrome.* callback APIs so you can always \`await browser.*\`.
-
-function promisify(fn, ctx) {
-  return function (...args) {
-    // If the last arg is already a function, the caller passed a callback —
-    // leave it alone so legacy code keeps working.
-    if (typeof args[args.length - 1] === 'function') {
-      return fn.apply(ctx, args)
-    }
-    return new Promise((resolve, reject) => {
-      fn.apply(ctx, [
-        ...args,
-        (...result) => {
-          const err = globalThis.chrome?.runtime?.lastError
-          if (err) reject(new Error(err.message))
-          else resolve(result.length <= 1 ? result[0] : result)
-        },
-      ])
-    })
-  }
-}
-
-function wrapNamespace(ns) {
-  if (!ns || typeof ns !== 'object') return ns
-  return new Proxy(ns, {
-    get(target, prop) {
-      const val = target[prop]
-      if (typeof val === 'function') return promisify(val, target)
-      if (val && typeof val === 'object' && !Array.isArray(val)) return wrapNamespace(val)
-      return val
-    },
-  })
-}
-
-const _raw = globalThis.chrome
-const _browser = new Proxy(_raw, {
-  get(target, prop) {
-    const ns = target[prop]
-    if (ns && typeof ns === 'object' && !Array.isArray(ns)) return wrapNamespace(ns)
-    return ns
-  },
-})
-
-globalThis.browser = _browser
-// Keep globalThis.chrome pointing to the raw API for code that expects callbacks
-// globalThis.chrome is already set by the extension runtime
-
-export default _browser
-export { _browser as browser }
-`.trimStart();
-}
-//#endregion
-//#region src/index.ts
-const VIRTUAL_ID = "virtual:webext/browser";
-const RESOLVED_ID = "\0virtual:webext/browser";
 function webext(options) {
-	const { defaultBrowser, browser, unavailableApi = "error", injectGlobals = true, manifest, zipArtifacts = true } = options;
+	const { defaultBrowser, browser, unavailableApi = "error", staticTransform = true, injectGlobals, manifest, zipArtifacts = true } = options;
 	const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser);
+	const shouldTransformNamespaces = injectGlobals ?? staticTransform;
 	let activeBrowser = null;
 	let resolvedManifest = null;
 	let rootDir = process.cwd();
@@ -152,13 +71,6 @@ function webext(options) {
 			browserOutDir = path.resolve(rootDir, config.build.outDir);
 			distRootDir = path.resolve(browserOutDir, "..");
 		},
-		resolveId(id) {
-			if (id === VIRTUAL_ID) return RESOLVED_ID;
-		},
-		load(id) {
-			if (id !== RESOLVED_ID) return;
-			return generateShim(requireBrowser(activeBrowser));
-		},
 		generateBundle: {
 			order: "post",
 			handler(_, bundle) {
@@ -186,10 +98,11 @@ function webext(options) {
 				if (unavailableApi === "error") this.error(message);
 				else if (unavailableApi === "warn") this.warn(message);
 			}
-			if (!injectGlobals) return null;
-			const rewritten = rewriteApiNamespacesToBrowser(code, (source) => this.parse(source));
+			if (!shouldTransformNamespaces) return null;
+			const targetNamespace = resolveApiNamespace(currentBrowser);
+			const rewritten = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace);
 			if (rewritten.count === 0) return null;
-			this.warn(`[vite-plugin-webext] Rewrote ${rewritten.count} "chrome.*" reference(s) to "browser.*" in ${id}.`);
+			this.warn(`[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
 			return {
 				code: rewritten.code,
 				map: rewritten.map
@@ -340,15 +253,18 @@ function normalizeSourcePath(filePath) {
 function normalizePath(filePath) {
 	return filePath.split(path.sep).join("/");
 }
-function rewriteApiNamespacesToBrowser(code, parse) {
+function resolveApiNamespace(browser) {
+	return browser === "chrome" ? "chrome" : "browser";
+}
+function rewriteApiNamespaces(code, parse, targetNamespace) {
 	const ast = parse(code);
 	const magic = new MagicString(code);
 	let count = 0;
 	walkAst(ast, (node) => {
 		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
 		const object = node.object;
-		if (object?.type === "Identifier" && object.name === "chrome" && typeof object.start === "number" && typeof object.end === "number") {
-			magic.overwrite(object.start, object.end, "browser");
+		if (object?.type === "Identifier" && (object.name === "chrome" || object.name === "browser") && object.name !== targetNamespace && typeof object.start === "number" && typeof object.end === "number") {
+			magic.overwrite(object.start, object.end, targetNamespace);
 			count++;
 		}
 	});

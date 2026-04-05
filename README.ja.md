@@ -7,7 +7,7 @@ It supports:
 - Browser target resolution from `--mode` (`chrome` / `firefox`)
 - Configurable default browser when `--mode` is not set
 - Manifest generation from `vite.config.ts`
-- Static namespace rewrite with MagicString (`chrome.*` -> `browser.*`)
+- Fully static namespace rewrite with MagicString (`chrome` output uses `chrome.*`, `firefox` output uses `browser.*`)
 - Browser-separated output directories
 - Zip artifact generation via `@zip.js/zip.js`
 
@@ -100,9 +100,24 @@ export default defineConfig({
 
 ## Static rewrite policy
 
-The plugin rewrites `chrome.*` access to `browser.*` with MagicString and emits warnings per file.
+Write extension code with `browser.*`.
 
-Codebase output should be unified to `browser.*`.
+At build time, the plugin performs fully static namespace rewriting with MagicString:
+
+- `vite build --mode chrome` rewrites `browser.*` / `chrome.*` to `chrome.*`
+- `vite build --mode firefox` rewrites `browser.*` / `chrome.*` to `browser.*`
+
+No runtime shim is injected.
+
+## TypeScript setup for `browser.*`
+
+Create `src/env.d.ts` in your extension project and add:
+
+```ts
+/// <reference types="@taisan11/vite-plugin-webext/types" />
+```
+
+This enables typings for the global `browser.*` API and `import.meta.env.BROWSER` / `IS_CHROME` / `IS_FIREFOX`.
 
 ## Output layout
 
