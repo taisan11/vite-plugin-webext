@@ -1,13 +1,25 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from '@zip.js/zip.js'
-import MagicString from 'magic-string'
 import type { Plugin, UserConfig } from 'vite'
+import {
+  CHROME_ONLY_APIS,
+  FIREFOX_ONLY_APIS,
+  hasApiNamespaceAccess,
+  hasUnavailableApiAccess,
+  resolveApiNamespace,
+  rewriteApiNamespaces,
+} from './browser/api-transform.ts'
+import {
+  prepareI18nArtifacts,
+  resolveI18nOptions,
+  rewriteI18nTCalls,
+  type I18nOptions,
+} from './i18n/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
 export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
-type ApiNamespace = 'browser' | 'chrome'
 
 export interface WebExtOptions {
   /**
@@ -45,43 +57,15 @@ export interface WebExtOptions {
    * Default: true
    */
   zipArtifacts?: boolean
+  /**
+   * Enable i18n helpers:
+   * - derive locale message id types from `src/locale/[localeName].ts` files exporting `defineLocale({...})`
+   * - statically rewrite `t(id)` to `browser.i18n.getMessage(id)`
+   *
+   * Default: disabled
+   */
+  i18n?: boolean | I18nOptions
 }
-
-const CHROME_ONLY_APIS = [
-  'offscreen',
-  'enterprise',
-  'documentScan',
-  'gcm',
-  'instanceID',
-  'loginState',
-  'platformKeys',
-  'printingMetrics',
-  'readingList',
-  'search',
-  'smartCardProviderPrivate',
-  'systemLog',
-  'topSites',
-  'ttsEngine',
-  'userScripts',
-  'vpnProvider',
-  'wallpaper',
-  'webAuthenticationProxy',
-] as const
-
-const FIREFOX_ONLY_APIS = [
-  'theme',
-  'browserSettings',
-  'captivePortal',
-  'dns',
-  'find',
-  'geckoProfiler',
-  'menus',
-  'normandyAddonStudy',
-  'pkcs11',
-  'proxy',
-  'telemetry',
-  'userScripts',
-] as const
 
 export function webext(options: WebExtOptions): Plugin {
   const {
@@ -92,12 +76,15 @@ export function webext(options: WebExtOptions): Plugin {
     injectGlobals,
     manifest,
     zipArtifacts = true,
+    i18n,
   } = options
   const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser)
   const shouldTransformNamespaces = injectGlobals ?? staticTransform
+  const resolvedI18nOptions = resolveI18nOptions(i18n)
 
   let activeBrowser: BrowserTarget | null = null
   let resolvedManifest: WebExtensionManifest | null = null
+  let localeMessageIds = new Set<string>()
   let rootDir = process.cwd()
   let browserOutDir = path.resolve(rootDir, 'dist')
   let distRootDir = browserOutDir
@@ -125,12 +112,16 @@ export function webext(options: WebExtOptions): Plugin {
       }
     },
 
-    configResolved(config) {
+    async configResolved(config) {
       rootDir = config.root
       activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser)
       resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
       browserOutDir = path.resolve(rootDir, config.build.outDir)
       distRootDir = path.resolve(browserOutDir, '..')
+      if (resolvedI18nOptions.enabled) {
+        const prepared = await prepareI18nArtifacts(rootDir, resolvedI18nOptions)
+        localeMessageIds = prepared.messageIds
+      }
     },
 
     generateBundle: {
@@ -164,15 +155,48 @@ export function webext(options: WebExtOptions): Plugin {
 
     transform(code, id) {
       if (id.includes('node_modules')) return null
-      if (!hasApiNamespaceAccess(code)) return null
+
+      let transformedCode = code
+      let transformedMap: ReturnType<typeof rewriteI18nTCalls>['map'] = null
+      let i18nRewriteCount = 0
+
+      if (resolvedI18nOptions.enabled) {
+        const i18nRewritten = rewriteI18nTCalls(
+          transformedCode,
+          (source) => this.parse(source),
+          localeMessageIds,
+        )
+        if (i18nRewritten.unknownIds.length > 0) {
+          this.error(
+            `[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(', ')}\n` +
+              `  → ${id}\n` +
+              '  Define ids in src/locale/[localeName].ts using defineLocale({...}).',
+          )
+        }
+        if (i18nRewritten.count > 0) {
+          transformedCode = i18nRewritten.code
+          transformedMap = i18nRewritten.map
+          i18nRewriteCount = i18nRewritten.count
+          this.warn(
+            `[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "browser.i18n.getMessage(...)" in ${id}.`,
+          )
+        }
+      }
+
+      if (!hasApiNamespaceAccess(transformedCode)) {
+        if (i18nRewriteCount === 0) return null
+        return {
+          code: transformedCode,
+          map: transformedMap,
+        }
+      }
 
       const currentBrowser = requireBrowser(activeBrowser)
       const unavailableApis =
         currentBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
 
       for (const api of unavailableApis) {
-        const pattern = new RegExp(`(?:browser|chrome)\\??\\.${escapeRe(api)}\\b`)
-        if (!pattern.test(code)) continue
+        if (!hasUnavailableApiAccess(transformedCode, api)) continue
 
         const message =
           `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n` +
@@ -184,11 +208,27 @@ export function webext(options: WebExtOptions): Plugin {
         }
       }
 
-      if (!shouldTransformNamespaces) return null
+      if (!shouldTransformNamespaces) {
+        if (i18nRewriteCount === 0) return null
+        return {
+          code: transformedCode,
+          map: transformedMap,
+        }
+      }
 
       const targetNamespace = resolveApiNamespace(currentBrowser)
-      const rewritten = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace)
-      if (rewritten.count === 0) return null
+      const rewritten = rewriteApiNamespaces(
+        transformedCode,
+        (source) => this.parse(source),
+        targetNamespace,
+      )
+      if (rewritten.count === 0) {
+        if (i18nRewriteCount === 0) return null
+        return {
+          code: transformedCode,
+          map: transformedMap,
+        }
+      }
 
       this.warn(
         `[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
@@ -196,7 +236,7 @@ export function webext(options: WebExtOptions): Plugin {
 
       return {
         code: rewritten.code,
-        map: rewritten.map,
+        map: i18nRewriteCount > 0 ? null : rewritten.map,
       }
     },
 
@@ -229,16 +269,6 @@ export function webext(options: WebExtOptions): Plugin {
       await fs.copyFile(distZipPath, modeZipPath)
     },
   }
-}
-
-interface AstNode {
-  type: string
-  start?: number
-  end?: number
-  computed?: boolean
-  object?: unknown
-  name?: string
-  [key: string]: unknown
 }
 
 interface BundleChunkLike {
@@ -299,14 +329,6 @@ function requireBrowser(browser: BrowserTarget | null): BrowserTarget {
 function withBrowserSubDir(outDir: string, browser: BrowserTarget): string {
   if (path.basename(outDir) === browser) return outDir
   return path.join(outDir, browser)
-}
-
-function hasApiNamespaceAccess(code: string): boolean {
-  return /\b(?:browser|chrome)\s*(?:\.|\?\.)/.test(code)
-}
-
-function escapeRe(s: string) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function resolveManifest(
@@ -466,62 +488,6 @@ function normalizeSourcePath(filePath: string): string {
 
 function normalizePath(filePath: string): string {
   return filePath.split(path.sep).join('/')
-}
-
-function resolveApiNamespace(browser: BrowserTarget): ApiNamespace {
-  return browser === 'chrome' ? 'chrome' : 'browser'
-}
-
-function rewriteApiNamespaces(
-  code: string,
-  parse: (source: string) => unknown,
-  targetNamespace: ApiNamespace,
-) {
-  const ast = parse(code) as AstNode
-  const magic = new MagicString(code)
-  let count = 0
-
-  walkAst(ast, (node) => {
-    if ((node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') || node.computed) {
-      return
-    }
-
-    const object = node.object as AstNode | undefined
-    if (
-      object?.type === 'Identifier' &&
-      (object.name === 'chrome' || object.name === 'browser') &&
-      object.name !== targetNamespace &&
-      typeof object.start === 'number' &&
-      typeof object.end === 'number'
-    ) {
-      magic.overwrite(object.start, object.end, targetNamespace)
-      count++
-    }
-  })
-
-  return {
-    count,
-    code: count > 0 ? magic.toString() : code,
-    map: count > 0 ? magic.generateMap({ hires: true }) : null,
-  }
-}
-
-function walkAst(node: unknown, visit: (node: AstNode) => void) {
-  if (!node || typeof node !== 'object') return
-
-  const astNode = node as AstNode
-  if (!astNode.type) return
-
-  visit(astNode)
-
-  for (const value of Object.values(astNode)) {
-    if (!value) continue
-    if (Array.isArray(value)) {
-      for (const item of value) walkAst(item, visit)
-      continue
-    }
-    walkAst(value, visit)
-  }
 }
 
 function sanitizeVersionForFileName(version: string): string {

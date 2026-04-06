@@ -2,7 +2,7 @@ import { promises } from "node:fs";
 import path from "node:path";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import MagicString from "magic-string";
-//#region src/index.ts
+//#region src/browser/api-transform.ts
 const CHROME_ONLY_APIS = [
 	"offscreen",
 	"enterprise",
@@ -37,12 +37,347 @@ const FIREFOX_ONLY_APIS = [
 	"telemetry",
 	"userScripts"
 ];
+function hasApiNamespaceAccess(code) {
+	return /\b(?:browser|chrome)\s*(?:\.|\?\.)/.test(code);
+}
+function hasUnavailableApiAccess(code, api) {
+	return new RegExp(`(?:browser|chrome)\\??\\.${escapeRe(api)}\\b`).test(code);
+}
+function resolveApiNamespace(browser) {
+	return browser === "chrome" ? "chrome" : "browser";
+}
+function rewriteApiNamespaces(code, parse, targetNamespace) {
+	const ast = parse(code);
+	const magic = new MagicString(code);
+	let count = 0;
+	walkAst$1(ast, (node) => {
+		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
+		const object = node.object;
+		if (object?.type === "Identifier" && (object.name === "chrome" || object.name === "browser") && object.name !== targetNamespace && typeof object.start === "number" && typeof object.end === "number") {
+			magic.overwrite(object.start, object.end, targetNamespace);
+			count++;
+		}
+	});
+	return {
+		count,
+		code: count > 0 ? magic.toString() : code,
+		map: count > 0 ? magic.generateMap({ hires: true }) : null
+	};
+}
+function walkAst$1(node, visit) {
+	if (!node || typeof node !== "object") return;
+	const astNode = node;
+	if (!astNode.type) return;
+	visit(astNode);
+	for (const value of Object.values(astNode)) {
+		if (!value) continue;
+		if (Array.isArray(value)) {
+			for (const item of value) walkAst$1(item, visit);
+			continue;
+		}
+		walkAst$1(value, visit);
+	}
+}
+function escapeRe(s) {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+//#endregion
+//#region src/i18n/transform.ts
+const DEFAULT_LOCALE_DIR = "src/locale";
+const DEFAULT_DTS_NAME = "webext-i18n.d.ts";
+const LOCALE_SOURCE_EXTENSIONS = new Set([
+	".ts",
+	".tsx",
+	".mts",
+	".cts",
+	".js",
+	".jsx",
+	".mjs",
+	".cjs"
+]);
+const I18N_IMPORT_SOURCES = new Set(["@taisan11/vite-plugin-webext/i18n", "@taisan11/vite-plugin-webext/src/i18n"]);
+function resolveI18nOptions(i18n) {
+	if (i18n === false || i18n == null) return {
+		enabled: false,
+		localeDir: DEFAULT_LOCALE_DIR,
+		generatedDtsPath: normalizePath$1(path.join(DEFAULT_LOCALE_DIR, DEFAULT_DTS_NAME))
+	};
+	if (i18n === true) return {
+		enabled: true,
+		localeDir: DEFAULT_LOCALE_DIR,
+		generatedDtsPath: normalizePath$1(path.join(DEFAULT_LOCALE_DIR, DEFAULT_DTS_NAME))
+	};
+	const localeDir = normalizePath$1(i18n.localeDir?.trim() || DEFAULT_LOCALE_DIR);
+	return {
+		enabled: i18n.enabled ?? true,
+		localeDir,
+		generatedDtsPath: normalizePath$1(path.join(localeDir, DEFAULT_DTS_NAME))
+	};
+}
+async function prepareI18nArtifacts(rootDir, options) {
+	const localeFiles = await readLocaleFiles(path.resolve(rootDir, options.localeDir));
+	if (localeFiles.length === 0) throw new Error(`[vite-plugin-webext] i18n is enabled, but no locale source files were found in "${options.localeDir}". Create src/locale/[localeName].ts and export defineLocale({...}).`);
+	const messageIds = /* @__PURE__ */ new Set();
+	for (const filePath of localeFiles) {
+		const source = await promises.readFile(filePath, "utf8");
+		for (const id of extractDefineLocaleMessageIds(source)) messageIds.add(id);
+	}
+	const generatedDtsPath = path.resolve(rootDir, options.generatedDtsPath);
+	await promises.mkdir(path.dirname(generatedDtsPath), { recursive: true });
+	await promises.writeFile(generatedDtsPath, renderLocaleMessageIdDts(messageIds));
+	return { messageIds };
+}
+function rewriteI18nTCalls(code, parse, messageIds) {
+	if (!hasI18nImport(code)) return {
+		count: 0,
+		unknownIds: [],
+		code,
+		map: null
+	};
+	const ast = parse(code);
+	const callTargets = collectImportedTCallTargets(ast);
+	if (callTargets.direct.size === 0 && callTargets.namespaces.size === 0) return {
+		count: 0,
+		unknownIds: [],
+		code,
+		map: null
+	};
+	const magic = new MagicString(code);
+	let count = 0;
+	const unknownIds = /* @__PURE__ */ new Set();
+	walkAst(ast, (node) => {
+		if (node.type !== "CallExpression") return;
+		if (!isTCallExpression(node, callTargets)) return;
+		const args = Array.isArray(node.arguments) ? node.arguments : [];
+		if (args.length === 0) return;
+		const firstArg = args[0];
+		if (!firstArg) return;
+		const messageId = getStaticMessageId(firstArg);
+		if (!messageId) return;
+		if (messageIds.size > 0 && !messageIds.has(messageId)) unknownIds.add(messageId);
+		const callStart = node.start;
+		const callEnd = node.end;
+		if (typeof callStart !== "number" || typeof callEnd !== "number") return;
+		const serializedArgs = args.map((arg) => {
+			if (typeof arg.start !== "number" || typeof arg.end !== "number") return "";
+			return code.slice(arg.start, arg.end);
+		}).filter((arg) => arg.length > 0).join(", ");
+		magic.overwrite(callStart, callEnd, `browser.i18n.getMessage(${serializedArgs})`);
+		count++;
+	});
+	return {
+		count,
+		unknownIds: [...unknownIds].sort(),
+		code: count > 0 ? magic.toString() : code,
+		map: count > 0 ? magic.generateMap({ hires: true }) : null
+	};
+}
+function hasI18nImport(code) {
+	return code.includes("vite-plugin-webext/i18n");
+}
+function collectImportedTCallTargets(ast) {
+	const direct = /* @__PURE__ */ new Set();
+	const namespaces = /* @__PURE__ */ new Set();
+	walkAst(ast, (node) => {
+		if (node.type !== "ImportDeclaration") return;
+		const source = node.source;
+		if (typeof source?.value !== "string" || !I18N_IMPORT_SOURCES.has(source.value)) return;
+		const specifiers = Array.isArray(node.specifiers) ? node.specifiers : [];
+		for (const specifier of specifiers) {
+			if (specifier.type === "ImportSpecifier") {
+				const imported = specifier.imported;
+				const local = specifier.local;
+				if (imported?.name === "t" && typeof local?.name === "string") direct.add(local.name);
+			}
+			if (specifier.type === "ImportNamespaceSpecifier") {
+				const local = specifier.local;
+				if (typeof local?.name === "string") namespaces.add(local.name);
+			}
+		}
+	});
+	return {
+		direct,
+		namespaces
+	};
+}
+function isTCallExpression(node, callTargets) {
+	const callee = node.callee;
+	if (!callee) return false;
+	if (callee.type === "Identifier" && typeof callee.name === "string") return callTargets.direct.has(callee.name);
+	if ((callee.type === "MemberExpression" || callee.type === "OptionalMemberExpression") && !callee.computed) {
+		const object = callee.object;
+		const property = callee.property;
+		return object?.type === "Identifier" && typeof object.name === "string" && callTargets.namespaces.has(object.name) && property?.type === "Identifier" && property.name === "t";
+	}
+	return false;
+}
+function getStaticMessageId(node) {
+	if (node.type === "Literal" && typeof node.value === "string") return node.value;
+	if (node.type !== "TemplateLiteral") return null;
+	if ((Array.isArray(node.expressions) ? node.expressions : []).length !== 0) return null;
+	const first = (Array.isArray(node.quasis) ? node.quasis : [])[0];
+	return typeof first?.value?.cooked === "string" ? first.value.cooked : null;
+}
+function walkAst(node, visit) {
+	if (!node || typeof node !== "object") return;
+	const astNode = node;
+	if (!astNode.type) return;
+	visit(astNode);
+	for (const value of Object.values(astNode)) {
+		if (!value) continue;
+		if (Array.isArray(value)) {
+			for (const item of value) walkAst(item, visit);
+			continue;
+		}
+		walkAst(value, visit);
+	}
+}
+async function readLocaleFiles(localeDir) {
+	let entries;
+	try {
+		entries = await promises.readdir(localeDir, {
+			withFileTypes: true,
+			encoding: "utf8"
+		});
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const results = [];
+	for (const entry of entries) {
+		if (!entry.isFile()) continue;
+		const extension = path.extname(entry.name);
+		if (!LOCALE_SOURCE_EXTENSIONS.has(extension)) continue;
+		if (entry.name.endsWith(".d.ts")) continue;
+		const filePath = path.join(localeDir, entry.name);
+		results.push(filePath);
+	}
+	return results.sort((a, b) => a.localeCompare(b));
+}
+function extractDefineLocaleMessageIds(source) {
+	const ids = /* @__PURE__ */ new Set();
+	let searchIndex = 0;
+	while (searchIndex < source.length) {
+		const defineLocaleIndex = source.indexOf("defineLocale", searchIndex);
+		if (defineLocaleIndex === -1) break;
+		const parenIndex = source.indexOf("(", defineLocaleIndex);
+		if (parenIndex === -1) break;
+		const objectStart = findNextNonSpaceIndex(source, parenIndex + 1);
+		if (objectStart === -1 || source[objectStart] !== "{") {
+			searchIndex = parenIndex + 1;
+			continue;
+		}
+		const objectEnd = findMatchingBrace(source, objectStart);
+		if (objectEnd === -1) {
+			searchIndex = objectStart + 1;
+			continue;
+		}
+		const objectText = source.slice(objectStart + 1, objectEnd);
+		for (const key of extractObjectLiteralKeys(objectText)) ids.add(key);
+		searchIndex = objectEnd + 1;
+	}
+	return ids;
+}
+function extractObjectLiteralKeys(source) {
+	const keys = [];
+	const keyPattern = /(?:^|,)\s*(?:(['"`])((?:\\.|(?!\1).)*)\1|([A-Za-z_$][\w$]*))\s*:/gms;
+	let match = keyPattern.exec(source);
+	while (match) {
+		const [, , quotedKey, bareKey] = match;
+		const key = (quotedKey ?? bareKey ?? "").trim();
+		if (key) keys.push(unescapeQuotedKey(key));
+		match = keyPattern.exec(source);
+	}
+	return keys;
+}
+function unescapeQuotedKey(value) {
+	return value.replace(/\\(['"`\\])/g, "$1");
+}
+function findNextNonSpaceIndex(source, fromIndex) {
+	for (let i = fromIndex; i < source.length; i++) {
+		const char = source[i];
+		if (!char) break;
+		if (!/\s/.test(char)) return i;
+	}
+	return -1;
+}
+function findMatchingBrace(source, openIndex) {
+	let depth = 0;
+	let inString = null;
+	let escaped = false;
+	let inLineComment = false;
+	let inBlockComment = false;
+	for (let i = openIndex; i < source.length; i++) {
+		const char = source[i];
+		const next = source[i + 1];
+		if (inLineComment) {
+			if (char === "\n") inLineComment = false;
+			continue;
+		}
+		if (inBlockComment) {
+			if (char === "*" && next === "/") {
+				inBlockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === inString) inString = null;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			inLineComment = true;
+			i++;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			inBlockComment = true;
+			i++;
+			continue;
+		}
+		if (char === "\"" || char === "'" || char === "`") {
+			inString = char;
+			continue;
+		}
+		if (char === "{") depth++;
+		if (char === "}") {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+function renderLocaleMessageIdDts(messageIds) {
+	const lines = [...messageIds].sort((a, b) => a.localeCompare(b)).map((id) => `    ${JSON.stringify(id)}: true`);
+	return `// Auto-generated by vite-plugin-webext. Do not edit.
+declare global {
+  interface WebextI18nMessageIdMap {
+${lines.join("\n")}${lines.length > 0 ? "\n" : ""}  }
+}
+export {}
+`;
+}
+function normalizePath$1(filePath) {
+	return filePath.split(path.sep).join("/");
+}
+//#endregion
+//#region src/index.ts
 function webext(options) {
-	const { defaultBrowser, browser, unavailableApi = "error", staticTransform = true, injectGlobals, manifest, zipArtifacts = true } = options;
+	const { defaultBrowser, browser, unavailableApi = "error", staticTransform = true, injectGlobals, manifest, zipArtifacts = true, i18n } = options;
 	const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser);
 	const shouldTransformNamespaces = injectGlobals ?? staticTransform;
+	const resolvedI18nOptions = resolveI18nOptions(i18n);
 	let activeBrowser = null;
 	let resolvedManifest = null;
+	let localeMessageIds = /* @__PURE__ */ new Set();
 	let rootDir = process.cwd();
 	let browserOutDir = path.resolve(rootDir, "dist");
 	let distRootDir = browserOutDir;
@@ -64,12 +399,13 @@ function webext(options) {
 				build: { outDir }
 			};
 		},
-		configResolved(config) {
+		async configResolved(config) {
 			rootDir = config.root;
 			activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser);
 			resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null;
 			browserOutDir = path.resolve(rootDir, config.build.outDir);
 			distRootDir = path.resolve(browserOutDir, "..");
+			if (resolvedI18nOptions.enabled) localeMessageIds = (await prepareI18nArtifacts(rootDir, resolvedI18nOptions)).messageIds;
 		},
 		generateBundle: {
 			order: "post",
@@ -89,23 +425,54 @@ function webext(options) {
 		},
 		transform(code, id) {
 			if (id.includes("node_modules")) return null;
-			if (!hasApiNamespaceAccess(code)) return null;
+			let transformedCode = code;
+			let transformedMap = null;
+			let i18nRewriteCount = 0;
+			if (resolvedI18nOptions.enabled) {
+				const i18nRewritten = rewriteI18nTCalls(transformedCode, (source) => this.parse(source), localeMessageIds);
+				if (i18nRewritten.unknownIds.length > 0) this.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
+				if (i18nRewritten.count > 0) {
+					transformedCode = i18nRewritten.code;
+					transformedMap = i18nRewritten.map;
+					i18nRewriteCount = i18nRewritten.count;
+					this.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "browser.i18n.getMessage(...)" in ${id}.`);
+				}
+			}
+			if (!hasApiNamespaceAccess(transformedCode)) {
+				if (i18nRewriteCount === 0) return null;
+				return {
+					code: transformedCode,
+					map: transformedMap
+				};
+			}
 			const currentBrowser = requireBrowser(activeBrowser);
 			const unavailableApis = currentBrowser === "chrome" ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS;
 			for (const api of unavailableApis) {
-				if (!new RegExp(`(?:browser|chrome)\\??\\.${escapeRe(api)}\\b`).test(code)) continue;
+				if (!hasUnavailableApiAccess(transformedCode, api)) continue;
 				const message = `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n  → ${id}`;
 				if (unavailableApi === "error") this.error(message);
 				else if (unavailableApi === "warn") this.warn(message);
 			}
-			if (!shouldTransformNamespaces) return null;
+			if (!shouldTransformNamespaces) {
+				if (i18nRewriteCount === 0) return null;
+				return {
+					code: transformedCode,
+					map: transformedMap
+				};
+			}
 			const targetNamespace = resolveApiNamespace(currentBrowser);
-			const rewritten = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace);
-			if (rewritten.count === 0) return null;
+			const rewritten = rewriteApiNamespaces(transformedCode, (source) => this.parse(source), targetNamespace);
+			if (rewritten.count === 0) {
+				if (i18nRewriteCount === 0) return null;
+				return {
+					code: transformedCode,
+					map: transformedMap
+				};
+			}
 			this.warn(`[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
 			return {
 				code: rewritten.code,
-				map: rewritten.map
+				map: i18nRewriteCount > 0 ? null : rewritten.map
 			};
 		},
 		async closeBundle() {
@@ -150,12 +517,6 @@ function requireBrowser(browser) {
 function withBrowserSubDir(outDir, browser) {
 	if (path.basename(outDir) === browser) return outDir;
 	return path.join(outDir, browser);
-}
-function hasApiNamespaceAccess(code) {
-	return /\b(?:browser|chrome)\s*(?:\.|\?\.)/.test(code);
-}
-function escapeRe(s) {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function resolveManifest(manifest, browser) {
 	return typeof manifest === "function" ? manifest(browser) : manifest;
@@ -252,41 +613,6 @@ function normalizeSourcePath(filePath) {
 }
 function normalizePath(filePath) {
 	return filePath.split(path.sep).join("/");
-}
-function resolveApiNamespace(browser) {
-	return browser === "chrome" ? "chrome" : "browser";
-}
-function rewriteApiNamespaces(code, parse, targetNamespace) {
-	const ast = parse(code);
-	const magic = new MagicString(code);
-	let count = 0;
-	walkAst(ast, (node) => {
-		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
-		const object = node.object;
-		if (object?.type === "Identifier" && (object.name === "chrome" || object.name === "browser") && object.name !== targetNamespace && typeof object.start === "number" && typeof object.end === "number") {
-			magic.overwrite(object.start, object.end, targetNamespace);
-			count++;
-		}
-	});
-	return {
-		count,
-		code: count > 0 ? magic.toString() : code,
-		map: count > 0 ? magic.generateMap({ hires: true }) : null
-	};
-}
-function walkAst(node, visit) {
-	if (!node || typeof node !== "object") return;
-	const astNode = node;
-	if (!astNode.type) return;
-	visit(astNode);
-	for (const value of Object.values(astNode)) {
-		if (!value) continue;
-		if (Array.isArray(value)) {
-			for (const item of value) walkAst(item, visit);
-			continue;
-		}
-		walkAst(value, visit);
-	}
 }
 function sanitizeVersionForFileName(version) {
 	return version.replace(/[^A-Za-z0-9._-]/g, "_");

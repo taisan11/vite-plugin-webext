@@ -119,6 +119,37 @@ Create `src/env.d.ts` in your extension project and add:
 
 This enables typings for the global `browser.*` API and `import.meta.env.BROWSER` / `IS_CHROME` / `IS_FIREFOX`.
 
+## i18n helper (`t(id)`)
+
+Enable i18n transform in plugin options:
+
+```ts
+webext({
+  i18n: true,
+})
+```
+
+Export `defineLocale(...)` from `src/locale/[localeName].ts` to register message ids:
+
+```ts
+import { defineLocale } from '@taisan11/vite-plugin-webext/i18n'
+
+export default defineLocale({
+  appTitle: 'My Extension',
+  openSettings: 'Open Settings',
+})
+```
+
+Use `t(id)` in extension code:
+
+```ts
+import { t } from '@taisan11/vite-plugin-webext/i18n'
+
+const title = t('appTitle')
+```
+
+At build time, `t('appTitle')` is statically rewritten to `browser.i18n.getMessage('appTitle')`, and message id types are derived from `src/locale/*.ts`.
+
 ## Output layout
 
 Build output is placed under:

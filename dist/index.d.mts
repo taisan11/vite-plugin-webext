@@ -1,5 +1,12 @@
+import MagicString from "magic-string";
 import { Plugin } from "vite";
 
+//#region src/i18n/transform.d.ts
+interface I18nOptions {
+  enabled?: boolean;
+  localeDir?: string;
+}
+//#endregion
 //#region src/types/manifest.d.ts
 /**
  * WebExtension manifest.json — Complete TypeScript Type Definitions
@@ -533,6 +540,14 @@ interface WebExtOptions {
    * Default: true
    */
   zipArtifacts?: boolean;
+  /**
+   * Enable i18n helpers:
+   * - derive locale message id types from `src/locale/[localeName].ts` files exporting `defineLocale({...})`
+   * - statically rewrite `t(id)` to `browser.i18n.getMessage(id)`
+   *
+   * Default: disabled
+   */
+  i18n?: boolean | I18nOptions;
 }
 declare function webext(options: WebExtOptions): Plugin;
 //#endregion

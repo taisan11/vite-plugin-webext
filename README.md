@@ -117,6 +117,37 @@ export default defineConfig({
 
 これで `browser.*` グローバルと `import.meta.env.BROWSER` / `IS_CHROME` / `IS_FIREFOX` に型が付きます。
 
+## i18n ヘルパー (`t(id)`)
+
+プラグイン設定で i18n 変換を有効化します。
+
+```ts
+webext({
+  i18n: true,
+})
+```
+
+`src/locale/[localeName].ts` で `defineLocale(...)` を export すると、メッセージ id が収集されます。
+
+```ts
+import { defineLocale } from '@taisan11/vite-plugin-webext/i18n'
+
+export default defineLocale({
+  appTitle: 'My Extension',
+  openSettings: 'Open Settings',
+})
+```
+
+拡張機能コードでは `t(id)` を使えます。
+
+```ts
+import { t } from '@taisan11/vite-plugin-webext/i18n'
+
+const title = t('appTitle')
+```
+
+ビルド時に `t('appTitle')` は静的に `browser.i18n.getMessage('appTitle')` へ置換され、`src/locale/*.ts` から id 型も自動導出されます。
+
 ## 出力ディレクトリ
 
 ビルド成果物は以下に分離されます。
