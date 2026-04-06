@@ -1,6 +1,6 @@
 {
   "name": "@taisan11/vite-plugin-webext",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Vite plugin for cross-browser web extension builds",
   "module": "./dist/index.mjs",
   "main": "./dist/index.mjs",
