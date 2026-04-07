@@ -1,44 +1,47 @@
 # vite-plugin-webext
 
-`@taisan11/vite-plugin-webext` は、WebExtension をクロスブラウザ（Chrome / Firefox）でビルドするための Vite プラグインです。
+`@taisan11/vite-plugin-webext` is a Vite plugin for cross-browser WebExtension builds.
 
-主な機能:
+It supports:
 
-- `--mode` (`chrome` / `firefox`) でターゲットブラウザを切り替え
-- `--mode` が未指定でもデフォルトターゲットブラウザを設定可能
-- `vite.config.ts` で定義した manifest の生成
-- MagicString による完全静的変換（`chrome` 出力は `chrome.*`、`firefox` 出力は `browser.*`）
-- ブラウザごとの出力ディレクトリ分離
-- `@zip.js/zip.js` を使った zip 生成
+- Browser target resolution from `--mode` (`chrome` / `firefox`)
+- Configurable default browser when `--mode` is not set
+- Manifest generation from `vite.config.ts`
+- Fully static namespace rewrite with MagicString (`chrome` output uses `chrome.*`, `firefox` output uses `browser.*`)
+- Type-safe messaging helpers with static replacement (`runtime.sendMessage` / `tabs.sendMessage`)
+- Browser-separated output directories
+- Zip artifact generation via `@zip.js/zip.js`
 
-## インストール
+## Install
 
 ```bash
 bun add @taisan11/vite-plugin-webext
 ```
 
-## このパッケージのビルド（tsdown）
+## Build this package with tsdown
 
-このプロジェクトは tsup ではなく `tsdown` を利用します。
+This project uses `tsdown` (replacement for tsup).
 
 ```bash
 bun run build
 ```
 
-`build` は `tsdown --dts` を実行し、JS と型定義を同時生成します。
+`build` runs `tsdown --dts`, so JS bundle and `.d.ts` are generated together.
 
-## `--mode` によるブラウザ切り替え
+## Browser target by `--mode`
+
+Use Vite mode to pick the browser:
 
 ```bash
 vite build --mode chrome
 vite build --mode firefox
 ```
 
-`webext({ defaultBrowser })` や `webext({ browser })` を併用しても、`--mode` が優先されます。
+If `webext({ defaultBrowser })` or `webext({ browser })` is also set, mode value takes precedence.
 
-## `--mode` 未指定時のデフォルトブラウザ
+## Default browser without `--mode`
 
-`--mode` が `chrome` / `firefox` 以外の場合に使うデフォルトを指定できます。
+You can set a fallback browser when build mode is not `chrome` / `firefox`:
 
 ```ts
 webext({
@@ -46,9 +49,9 @@ webext({
 })
 ```
 
-`browser` は後方互換のため、`defaultBrowser` のエイリアスとして引き続き利用できます。
+`browser` is still supported as a backward-compatible alias of `defaultBrowser`.
 
-## 基本設定
+## Plugin usage
 
 ```ts
 import { defineConfig } from 'vite'
@@ -68,14 +71,14 @@ export default defineConfig({
 })
 ```
 
-`manifest` は以下を受け付けます。
+`manifest` can be:
 
 - `WebExtensionManifest`
 - `(browser) => WebExtensionManifest`
 
-## `build.rolldownOptions.input` の設定例
+## `build.rolldownOptions.input` example
 
-拡張機能で複数エントリを使う場合は `build.rolldownOptions.input` を指定します。
+For multi-entry extension builds, set input via `build.rolldownOptions.input`:
 
 ```ts
 import { defineConfig } from 'vite'
@@ -96,30 +99,30 @@ export default defineConfig({
 })
 ```
 
-## 静的変換ポリシー
+## Static rewrite policy
 
-拡張機能のコードは `browser.*` で統一して記述します。
+Write extension code with `browser.*`.
 
-ビルド時に MagicString で完全静的変換を行います。
+At build time, the plugin performs fully static namespace rewriting with MagicString:
 
-- `vite build --mode chrome` では `browser.*` / `chrome.*` を `chrome.*` へ統一
-- `vite build --mode firefox` では `browser.*` / `chrome.*` を `browser.*` へ統一
+- `vite build --mode chrome` rewrites `browser.*` / `chrome.*` to `chrome.*`
+- `vite build --mode firefox` rewrites `browser.*` / `chrome.*` to `browser.*`
 
-ランタイム shim は注入しません。
+No runtime shim is injected.
 
-## `browser.*` の型を有効化する方法
+## TypeScript setup for `browser.*`
 
-拡張機能側のプロジェクトに `src/env.d.ts` を作成し、次を追加してください。
+Create `src/env.d.ts` in your extension project and add:
 
 ```ts
 /// <reference types="@taisan11/vite-plugin-webext/types" />
 ```
 
-これで `browser.*` グローバルと `import.meta.env.BROWSER` / `IS_CHROME` / `IS_FIREFOX` に型が付きます。
+This enables typings for the global `browser.*` API and `import.meta.env.BROWSER` / `IS_CHROME` / `IS_FIREFOX`.
 
-## i18n ヘルパー (`t(id)`)
+## i18n helper (`t(id)`)
 
-プラグイン設定で i18n 変換を有効化します。
+Enable i18n transform in plugin options:
 
 ```ts
 webext({
@@ -127,7 +130,7 @@ webext({
 })
 ```
 
-`src/locale/[localeName].ts` で `defineLocale(...)` を export すると、メッセージ id が収集されます。
+Export `defineLocale(...)` from `src/locale/[localeName].ts` to register message ids:
 
 ```ts
 import { defineLocale } from '@taisan11/vite-plugin-webext/i18n'
@@ -135,10 +138,20 @@ import { defineLocale } from '@taisan11/vite-plugin-webext/i18n'
 export default defineLocale({
   appTitle: 'My Extension',
   openSettings: 'Open Settings',
+  notificationContent: {
+    message: 'You clicked $URL$.',
+    description: 'Tells the user which link they clicked.',
+    placeholders: {
+      url: {
+        content: '$1',
+        example: 'https://developer.mozilla.org',
+      },
+    },
+  },
 })
 ```
 
-拡張機能コードでは `t(id)` を使えます。
+Use `t(id)` in extension code:
 
 ```ts
 import { t } from '@taisan11/vite-plugin-webext/i18n'
@@ -146,29 +159,56 @@ import { t } from '@taisan11/vite-plugin-webext/i18n'
 const title = t('appTitle')
 ```
 
-ビルド時に `t('appTitle')` は静的に `browser.i18n.getMessage('appTitle')` へ置換され、`src/locale/*.ts` から id 型も自動導出されます。
+At build time, `t('appTitle')` is statically rewritten to `browser.i18n.getMessage('appTitle')`, and message id types are derived from `src/locale/*.ts`.
+Nested keys such as `notificationContent.message` are not collected as message ids; only top-level ids like `notificationContent` are collected.
 
-## 出力ディレクトリ
+## messaging helpers (`sendMessage`, `sendMessageToTab`)
 
-ビルド成果物は以下に分離されます。
+You can define request/response contracts by augmenting `WebextMessageMap`:
+
+```ts
+declare global {
+  interface WebextMessageMap {
+    getProfile: { request: { userId: string }; response: { name: string } }
+  }
+}
+```
+
+Use typed helpers from `@taisan11/vite-plugin-webext/messaging`:
+
+```ts
+import { sendMessage, sendMessageToTab } from '@taisan11/vite-plugin-webext/messaging'
+
+const profile = await sendMessage('getProfile', { userId: '42' })
+await sendMessageToTab(1, 'getProfile', { userId: '42' })
+```
+
+At build time, helper calls are statically rewritten to native APIs:
+
+- `sendMessage(type, payload, options?)` → `browser.runtime.sendMessage({ type, payload }, options?)`
+- `sendMessageToTab(tabId, type, payload, options?)` → `browser.tabs.sendMessage(tabId, { type, payload }, options?)`
+
+## Output layout
+
+Build output is placed under:
 
 - `dist/chrome/`
 - `dist/firefox/`
 
-## zip 生成
+## Zip artifacts
 
-`--mode` でビルドすると次を生成します。
+When building with mode, the plugin creates:
 
 - `dist/<browser>-<version>-source.zip`
 - `dist/<browser>-<version>-dist.zip`
 - `dist/<browser>-zip.zip`
 
-Chrome の例:
+Example for chrome mode:
 
 - `dist/chrome-1.2.3-source.zip`
 - `dist/chrome-1.2.3-dist.zip`
 - `dist/chrome-zip.zip`
 
-`zipArtifacts: false` を指定すると zip 生成を無効化できます。
+Set `zipArtifacts: false` to disable zip generation.
 
-ブラウザ別の出力ディレクトリが存在しない場合（例: `build.write: false`）は、dist zip 生成を警告付きでスキップし、ビルドを失敗させません。
+If the browser output directory is missing (for example, `build.write: false`), dist zip generation is skipped with a warning instead of failing the build.

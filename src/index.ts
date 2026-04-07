@@ -16,6 +16,7 @@ import {
   rewriteI18nTCalls,
   type I18nOptions,
 } from './i18n/transform.ts'
+import { rewriteMessagingCalls } from './messaging/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
@@ -159,6 +160,7 @@ export function webext(options: WebExtOptions): Plugin {
       let transformedCode = code
       let transformedMap: ReturnType<typeof rewriteI18nTCalls>['map'] = null
       let i18nRewriteCount = 0
+      let messagingRewriteCount = 0
 
       if (resolvedI18nOptions.enabled) {
         const i18nRewritten = rewriteI18nTCalls(
@@ -183,8 +185,18 @@ export function webext(options: WebExtOptions): Plugin {
         }
       }
 
+      const messagingRewritten = rewriteMessagingCalls(transformedCode, (source) => this.parse(source))
+      if (messagingRewritten.count > 0) {
+        transformedCode = messagingRewritten.code
+        transformedMap = i18nRewriteCount > 0 ? null : messagingRewritten.map
+        messagingRewriteCount = messagingRewritten.count
+        this.warn(
+          `[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`,
+        )
+      }
+
       if (!hasApiNamespaceAccess(transformedCode)) {
-        if (i18nRewriteCount === 0) return null
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
         return {
           code: transformedCode,
           map: transformedMap,
@@ -209,7 +221,7 @@ export function webext(options: WebExtOptions): Plugin {
       }
 
       if (!shouldTransformNamespaces) {
-        if (i18nRewriteCount === 0) return null
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
         return {
           code: transformedCode,
           map: transformedMap,
@@ -223,7 +235,7 @@ export function webext(options: WebExtOptions): Plugin {
         targetNamespace,
       )
       if (rewritten.count === 0) {
-        if (i18nRewriteCount === 0) return null
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
         return {
           code: transformedCode,
           map: transformedMap,
@@ -236,7 +248,7 @@ export function webext(options: WebExtOptions): Plugin {
 
       return {
         code: rewritten.code,
-        map: i18nRewriteCount > 0 ? null : rewritten.map,
+        map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map,
       }
     },
 

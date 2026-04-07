@@ -23,6 +23,11 @@
       "import": "./dist/i18n/index.mjs",
       "default": "./dist/i18n/index.mjs"
     },
+    "./messaging": {
+      "types": "./dist/messaging/index.d.mts",
+      "import": "./dist/messaging/index.mjs",
+      "default": "./dist/messaging/index.mjs"
+    },
     "./types": "./src/webext-types.d.ts",
     "./package.json": "./package.json"
   },

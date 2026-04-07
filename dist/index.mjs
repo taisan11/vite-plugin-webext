@@ -50,7 +50,7 @@ function rewriteApiNamespaces(code, parse, targetNamespace) {
 	const ast = parse(code);
 	const magic = new MagicString(code);
 	let count = 0;
-	walkAst$1(ast, (node) => {
+	walkAst$2(ast, (node) => {
 		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
 		const object = node.object;
 		if (object?.type === "Identifier" && (object.name === "chrome" || object.name === "browser") && object.name !== targetNamespace && typeof object.start === "number" && typeof object.end === "number") {
@@ -64,7 +64,7 @@ function rewriteApiNamespaces(code, parse, targetNamespace) {
 		map: count > 0 ? magic.generateMap({ hires: true }) : null
 	};
 }
-function walkAst$1(node, visit) {
+function walkAst$2(node, visit) {
 	if (!node || typeof node !== "object") return;
 	const astNode = node;
 	if (!astNode.type) return;
@@ -72,10 +72,10 @@ function walkAst$1(node, visit) {
 	for (const value of Object.values(astNode)) {
 		if (!value) continue;
 		if (Array.isArray(value)) {
-			for (const item of value) walkAst$1(item, visit);
+			for (const item of value) walkAst$2(item, visit);
 			continue;
 		}
-		walkAst$1(value, visit);
+		walkAst$2(value, visit);
 	}
 }
 function escapeRe(s) {
@@ -145,7 +145,7 @@ function rewriteI18nTCalls(code, parse, messageIds) {
 	const magic = new MagicString(code);
 	let count = 0;
 	const unknownIds = /* @__PURE__ */ new Set();
-	walkAst(ast, (node) => {
+	walkAst$1(ast, (node) => {
 		if (node.type !== "CallExpression") return;
 		if (!isTCallExpression(node, callTargets)) return;
 		const args = Array.isArray(node.arguments) ? node.arguments : [];
@@ -178,7 +178,7 @@ function hasI18nImport(code) {
 function collectImportedTCallTargets(ast) {
 	const direct = /* @__PURE__ */ new Set();
 	const namespaces = /* @__PURE__ */ new Set();
-	walkAst(ast, (node) => {
+	walkAst$1(ast, (node) => {
 		if (node.type !== "ImportDeclaration") return;
 		const source = node.source;
 		if (typeof source?.value !== "string" || !I18N_IMPORT_SOURCES.has(source.value)) return;
@@ -218,7 +218,7 @@ function getStaticMessageId(node) {
 	const first = (Array.isArray(node.quasis) ? node.quasis : [])[0];
 	return typeof first?.value?.cooked === "string" ? first.value.cooked : null;
 }
-function walkAst(node, visit) {
+function walkAst$1(node, visit) {
 	if (!node || typeof node !== "object") return;
 	const astNode = node;
 	if (!astNode.type) return;
@@ -226,10 +226,10 @@ function walkAst(node, visit) {
 	for (const value of Object.values(astNode)) {
 		if (!value) continue;
 		if (Array.isArray(value)) {
-			for (const item of value) walkAst(item, visit);
+			for (const item of value) walkAst$1(item, visit);
 			continue;
 		}
-		walkAst(value, visit);
+		walkAst$1(value, visit);
 	}
 }
 async function readLocaleFiles(localeDir) {
@@ -273,25 +273,197 @@ function extractDefineLocaleMessageIds(source) {
 			continue;
 		}
 		const objectText = source.slice(objectStart + 1, objectEnd);
-		for (const key of extractObjectLiteralKeys(objectText)) ids.add(key);
+		for (const key of extractTopLevelObjectLiteralKeys(objectText)) ids.add(key);
 		searchIndex = objectEnd + 1;
 	}
 	return ids;
 }
-function extractObjectLiteralKeys(source) {
+function extractTopLevelObjectLiteralKeys(source) {
 	const keys = [];
-	const keyPattern = /(?:^|,)\s*(?:(['"`])((?:\\.|(?!\1).)*)\1|([A-Za-z_$][\w$]*))\s*:/gms;
-	let match = keyPattern.exec(source);
-	while (match) {
-		const [, , quotedKey, bareKey] = match;
-		const key = (quotedKey ?? bareKey ?? "").trim();
-		if (key) keys.push(unescapeQuotedKey(key));
-		match = keyPattern.exec(source);
+	const properties = splitTopLevelObjectProperties(source);
+	for (const property of properties) {
+		const key = parseObjectPropertyKey(property);
+		if (key) keys.push(key);
 	}
 	return keys;
 }
+function splitTopLevelObjectProperties(source) {
+	const properties = [];
+	let inString = null;
+	let escaped = false;
+	let inLineComment = false;
+	let inBlockComment = false;
+	let braceDepth = 0;
+	let bracketDepth = 0;
+	let parenDepth = 0;
+	let segmentStart = 0;
+	for (let i = 0; i < source.length; i++) {
+		const char = source[i];
+		const next = source[i + 1];
+		if (inLineComment) {
+			if (char === "\n") inLineComment = false;
+			continue;
+		}
+		if (inBlockComment) {
+			if (char === "*" && next === "/") {
+				inBlockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === inString) inString = null;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			inLineComment = true;
+			i++;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			inBlockComment = true;
+			i++;
+			continue;
+		}
+		if (char === "\"" || char === "'" || char === "`") {
+			inString = char;
+			continue;
+		}
+		if (char === "{") {
+			braceDepth++;
+			continue;
+		}
+		if (char === "}") {
+			braceDepth--;
+			continue;
+		}
+		if (char === "[") {
+			bracketDepth++;
+			continue;
+		}
+		if (char === "]") {
+			bracketDepth--;
+			continue;
+		}
+		if (char === "(") {
+			parenDepth++;
+			continue;
+		}
+		if (char === ")") {
+			parenDepth--;
+			continue;
+		}
+		if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0 && char === ",") {
+			const property = source.slice(segmentStart, i).trim();
+			if (property) properties.push(property);
+			segmentStart = i + 1;
+		}
+	}
+	const lastProperty = source.slice(segmentStart).trim();
+	if (lastProperty) properties.push(lastProperty);
+	return properties;
+}
+function parseObjectPropertyKey(property) {
+	if (property.startsWith("...")) return null;
+	const colonIndex = findTopLevelColonIndex(property);
+	if (colonIndex === -1) return null;
+	const rawKey = property.slice(0, colonIndex).trim();
+	if (!rawKey || rawKey.startsWith("[")) return null;
+	if (/^[A-Za-z_$][\w$]*$/.test(rawKey)) return rawKey;
+	if (/^\d+$/.test(rawKey)) return rawKey;
+	if (rawKey.length >= 2) {
+		const quote = rawKey[0];
+		const endQuote = rawKey[rawKey.length - 1];
+		if ((quote === "\"" || quote === "'" || quote === "`") && endQuote === quote) return unescapeQuotedKey(rawKey.slice(1, -1));
+	}
+	return null;
+}
+function findTopLevelColonIndex(source) {
+	let inString = null;
+	let escaped = false;
+	let inLineComment = false;
+	let inBlockComment = false;
+	let braceDepth = 0;
+	let bracketDepth = 0;
+	let parenDepth = 0;
+	for (let i = 0; i < source.length; i++) {
+		const char = source[i];
+		const next = source[i + 1];
+		if (inLineComment) {
+			if (char === "\n") inLineComment = false;
+			continue;
+		}
+		if (inBlockComment) {
+			if (char === "*" && next === "/") {
+				inBlockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === inString) inString = null;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			inLineComment = true;
+			i++;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			inBlockComment = true;
+			i++;
+			continue;
+		}
+		if (char === "\"" || char === "'" || char === "`") {
+			inString = char;
+			continue;
+		}
+		if (char === "{") {
+			braceDepth++;
+			continue;
+		}
+		if (char === "}") {
+			braceDepth--;
+			continue;
+		}
+		if (char === "[") {
+			bracketDepth++;
+			continue;
+		}
+		if (char === "]") {
+			bracketDepth--;
+			continue;
+		}
+		if (char === "(") {
+			parenDepth++;
+			continue;
+		}
+		if (char === ")") {
+			parenDepth--;
+			continue;
+		}
+		if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0 && char === ":") return i;
+	}
+	return -1;
+}
 function unescapeQuotedKey(value) {
-	return value.replace(/\\(['"`\\])/g, "$1");
+	return value.replace(/\\(['"`\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "	");
 }
 function findNextNonSpaceIndex(source, fromIndex) {
 	for (let i = fromIndex; i < source.length; i++) {
@@ -369,6 +541,132 @@ function normalizePath$1(filePath) {
 	return filePath.split(path.sep).join("/");
 }
 //#endregion
+//#region src/messaging/transform.ts
+const MESSAGING_IMPORT_SOURCES = new Set(["@taisan11/vite-plugin-webext/messaging", "@taisan11/vite-plugin-webext/src/messaging"]);
+function rewriteMessagingCalls(code, parse) {
+	if (!hasMessagingImport(code)) return {
+		count: 0,
+		code,
+		map: null
+	};
+	const ast = parse(code);
+	const callTargets = collectImportedMessagingCallTargets(ast);
+	if (callTargets.direct.size === 0 && callTargets.namespaces.size === 0) return {
+		count: 0,
+		code,
+		map: null
+	};
+	const magic = new MagicString(code);
+	let count = 0;
+	walkAst(ast, (node) => {
+		if (node.type !== "CallExpression") return;
+		const operation = resolveMessagingOperation(node, callTargets);
+		if (!operation) return;
+		const replacement = renderMessagingReplacement(operation, Array.isArray(node.arguments) ? node.arguments : [], code);
+		if (!replacement) return;
+		if (typeof node.start !== "number" || typeof node.end !== "number") return;
+		magic.overwrite(node.start, node.end, replacement);
+		count++;
+	});
+	return {
+		count,
+		code: count > 0 ? magic.toString() : code,
+		map: count > 0 ? magic.generateMap({ hires: true }) : null
+	};
+}
+function hasMessagingImport(code) {
+	return code.includes("vite-plugin-webext/messaging");
+}
+function collectImportedMessagingCallTargets(ast) {
+	const direct = /* @__PURE__ */ new Map();
+	const namespaces = /* @__PURE__ */ new Set();
+	walkAst(ast, (node) => {
+		if (node.type !== "ImportDeclaration") return;
+		const source = node.source;
+		if (typeof source?.value !== "string" || !MESSAGING_IMPORT_SOURCES.has(source.value)) return;
+		const specifiers = Array.isArray(node.specifiers) ? node.specifiers : [];
+		for (const specifier of specifiers) {
+			if (specifier.type === "ImportSpecifier") {
+				const imported = specifier.imported;
+				const local = specifier.local;
+				if (typeof local?.name !== "string") continue;
+				if (imported?.name === "sendMessage") {
+					direct.set(local.name, "runtime");
+					continue;
+				}
+				if (imported?.name === "sendMessageToTab") direct.set(local.name, "tabs");
+			}
+			if (specifier.type === "ImportNamespaceSpecifier") {
+				const local = specifier.local;
+				if (typeof local?.name === "string") namespaces.add(local.name);
+			}
+		}
+	});
+	return {
+		direct,
+		namespaces
+	};
+}
+function resolveMessagingOperation(node, callTargets) {
+	const callee = node.callee;
+	if (!callee) return null;
+	if (callee.type === "Identifier" && typeof callee.name === "string") return callTargets.direct.get(callee.name) ?? null;
+	if ((callee.type === "MemberExpression" || callee.type === "OptionalMemberExpression") && !callee.computed) {
+		const object = callee.object;
+		const property = callee.property;
+		if (object?.type !== "Identifier" || typeof object.name !== "string" || !callTargets.namespaces.has(object.name) || property?.type !== "Identifier") return null;
+		if (property.name === "sendMessage") return "runtime";
+		if (property.name === "sendMessageToTab") return "tabs";
+	}
+	return null;
+}
+function renderMessagingReplacement(operation, args, code) {
+	if (operation === "runtime") {
+		const typeArg = args[0];
+		const payloadArg = args[1];
+		if (!typeArg || !payloadArg) return null;
+		if (typeArg.type === "SpreadElement" || payloadArg.type === "SpreadElement") return null;
+		const typeSource = sliceNode(code, typeArg);
+		const payloadSource = sliceNode(code, payloadArg);
+		if (!typeSource || !payloadSource) return null;
+		const optionsSource = args[2] ? sliceNode(code, args[2]) : "";
+		if (args[2] && !optionsSource) return null;
+		const messageObject = `{ type: ${typeSource}, payload: ${payloadSource} }`;
+		return optionsSource ? `browser.runtime.sendMessage(${messageObject}, ${optionsSource})` : `browser.runtime.sendMessage(${messageObject})`;
+	}
+	const tabIdArg = args[0];
+	const typeArg = args[1];
+	const payloadArg = args[2];
+	if (!tabIdArg || !typeArg || !payloadArg) return null;
+	if (tabIdArg.type === "SpreadElement" || typeArg.type === "SpreadElement" || payloadArg.type === "SpreadElement") return null;
+	const tabIdSource = sliceNode(code, tabIdArg);
+	const typeSource = sliceNode(code, typeArg);
+	const payloadSource = sliceNode(code, payloadArg);
+	if (!tabIdSource || !typeSource || !payloadSource) return null;
+	const optionsSource = args[3] ? sliceNode(code, args[3]) : "";
+	if (args[3] && !optionsSource) return null;
+	const messageObject = `{ type: ${typeSource}, payload: ${payloadSource} }`;
+	return optionsSource ? `browser.tabs.sendMessage(${tabIdSource}, ${messageObject}, ${optionsSource})` : `browser.tabs.sendMessage(${tabIdSource}, ${messageObject})`;
+}
+function sliceNode(code, node) {
+	if (typeof node.start !== "number" || typeof node.end !== "number") return "";
+	return code.slice(node.start, node.end);
+}
+function walkAst(node, visit) {
+	if (!node || typeof node !== "object") return;
+	const astNode = node;
+	if (!astNode.type) return;
+	visit(astNode);
+	for (const value of Object.values(astNode)) {
+		if (!value) continue;
+		if (Array.isArray(value)) {
+			for (const item of value) walkAst(item, visit);
+			continue;
+		}
+		walkAst(value, visit);
+	}
+}
+//#endregion
 //#region src/index.ts
 function webext(options) {
 	const { defaultBrowser, browser, unavailableApi = "error", staticTransform = true, injectGlobals, manifest, zipArtifacts = true, i18n } = options;
@@ -428,6 +726,7 @@ function webext(options) {
 			let transformedCode = code;
 			let transformedMap = null;
 			let i18nRewriteCount = 0;
+			let messagingRewriteCount = 0;
 			if (resolvedI18nOptions.enabled) {
 				const i18nRewritten = rewriteI18nTCalls(transformedCode, (source) => this.parse(source), localeMessageIds);
 				if (i18nRewritten.unknownIds.length > 0) this.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
@@ -438,8 +737,15 @@ function webext(options) {
 					this.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "browser.i18n.getMessage(...)" in ${id}.`);
 				}
 			}
+			const messagingRewritten = rewriteMessagingCalls(transformedCode, (source) => this.parse(source));
+			if (messagingRewritten.count > 0) {
+				transformedCode = messagingRewritten.code;
+				transformedMap = i18nRewriteCount > 0 ? null : messagingRewritten.map;
+				messagingRewriteCount = messagingRewritten.count;
+				this.warn(`[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`);
+			}
 			if (!hasApiNamespaceAccess(transformedCode)) {
-				if (i18nRewriteCount === 0) return null;
+				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
 				return {
 					code: transformedCode,
 					map: transformedMap
@@ -454,7 +760,7 @@ function webext(options) {
 				else if (unavailableApi === "warn") this.warn(message);
 			}
 			if (!shouldTransformNamespaces) {
-				if (i18nRewriteCount === 0) return null;
+				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
 				return {
 					code: transformedCode,
 					map: transformedMap
@@ -463,7 +769,7 @@ function webext(options) {
 			const targetNamespace = resolveApiNamespace(currentBrowser);
 			const rewritten = rewriteApiNamespaces(transformedCode, (source) => this.parse(source), targetNamespace);
 			if (rewritten.count === 0) {
-				if (i18nRewriteCount === 0) return null;
+				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
 				return {
 					code: transformedCode,
 					map: transformedMap
@@ -472,7 +778,7 @@ function webext(options) {
 			this.warn(`[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
 			return {
 				code: rewritten.code,
-				map: i18nRewriteCount > 0 ? null : rewritten.map
+				map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map
 			};
 		},
 		async closeBundle() {

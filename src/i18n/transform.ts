@@ -300,7 +300,7 @@ function extractDefineLocaleMessageIds(source: string): Set<string> {
     }
 
     const objectText = source.slice(objectStart + 1, objectEnd)
-    for (const key of extractObjectLiteralKeys(objectText)) {
+    for (const key of extractTopLevelObjectLiteralKeys(objectText)) {
       ids.add(key)
     }
     searchIndex = objectEnd + 1
@@ -309,21 +309,228 @@ function extractDefineLocaleMessageIds(source: string): Set<string> {
   return ids
 }
 
-function extractObjectLiteralKeys(source: string): string[] {
+function extractTopLevelObjectLiteralKeys(source: string): string[] {
   const keys: string[] = []
-  const keyPattern = /(?:^|,)\s*(?:(['"`])((?:\\.|(?!\1).)*)\1|([A-Za-z_$][\w$]*))\s*:/gms
-  let match: RegExpExecArray | null = keyPattern.exec(source)
-  while (match) {
-    const [, , quotedKey, bareKey] = match
-    const key = (quotedKey ?? bareKey ?? '').trim()
-    if (key) keys.push(unescapeQuotedKey(key))
-    match = keyPattern.exec(source)
+  const properties = splitTopLevelObjectProperties(source)
+  for (const property of properties) {
+    const key = parseObjectPropertyKey(property)
+    if (key) {
+      keys.push(key)
+    }
   }
   return keys
 }
 
+function splitTopLevelObjectProperties(source: string): string[] {
+  const properties: string[] = []
+  let inString: '"' | "'" | '`' | null = null
+  let escaped = false
+  let inLineComment = false
+  let inBlockComment = false
+  let braceDepth = 0
+  let bracketDepth = 0
+  let parenDepth = 0
+  let segmentStart = 0
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]
+    const next = source[i + 1]
+
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false
+      continue
+    }
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false
+        i++
+      }
+      continue
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === inString) {
+        inString = null
+      }
+      continue
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true
+      i++
+      continue
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true
+      i++
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      inString = char
+      continue
+    }
+
+    if (char === '{') {
+      braceDepth++
+      continue
+    }
+    if (char === '}') {
+      braceDepth--
+      continue
+    }
+    if (char === '[') {
+      bracketDepth++
+      continue
+    }
+    if (char === ']') {
+      bracketDepth--
+      continue
+    }
+    if (char === '(') {
+      parenDepth++
+      continue
+    }
+    if (char === ')') {
+      parenDepth--
+      continue
+    }
+
+    const isTopLevel = braceDepth === 0 && bracketDepth === 0 && parenDepth === 0
+    if (isTopLevel && char === ',') {
+      const property = source.slice(segmentStart, i).trim()
+      if (property) properties.push(property)
+      segmentStart = i + 1
+    }
+  }
+
+  const lastProperty = source.slice(segmentStart).trim()
+  if (lastProperty) properties.push(lastProperty)
+  return properties
+}
+
+function parseObjectPropertyKey(property: string): string | null {
+  if (property.startsWith('...')) return null
+  const colonIndex = findTopLevelColonIndex(property)
+  if (colonIndex === -1) return null
+
+  const rawKey = property.slice(0, colonIndex).trim()
+  if (!rawKey || rawKey.startsWith('[')) return null
+
+  if (/^[A-Za-z_$][\w$]*$/.test(rawKey)) return rawKey
+  if (/^\d+$/.test(rawKey)) return rawKey
+
+  if (rawKey.length >= 2) {
+    const quote = rawKey[0]
+    const endQuote = rawKey[rawKey.length - 1]
+    if ((quote === '"' || quote === "'" || quote === '`') && endQuote === quote) {
+      const body = rawKey.slice(1, -1)
+      return unescapeQuotedKey(body)
+    }
+  }
+
+  return null
+}
+
+function findTopLevelColonIndex(source: string): number {
+  let inString: '"' | "'" | '`' | null = null
+  let escaped = false
+  let inLineComment = false
+  let inBlockComment = false
+  let braceDepth = 0
+  let bracketDepth = 0
+  let parenDepth = 0
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]
+    const next = source[i + 1]
+
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false
+      continue
+    }
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false
+        i++
+      }
+      continue
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === inString) {
+        inString = null
+      }
+      continue
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true
+      i++
+      continue
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true
+      i++
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      inString = char
+      continue
+    }
+
+    if (char === '{') {
+      braceDepth++
+      continue
+    }
+    if (char === '}') {
+      braceDepth--
+      continue
+    }
+    if (char === '[') {
+      bracketDepth++
+      continue
+    }
+    if (char === ']') {
+      bracketDepth--
+      continue
+    }
+    if (char === '(') {
+      parenDepth++
+      continue
+    }
+    if (char === ')') {
+      parenDepth--
+      continue
+    }
+
+    if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0 && char === ':') {
+      return i
+    }
+  }
+
+  return -1
+}
+
 function unescapeQuotedKey(value: string): string {
-  return value.replace(/\\(['"`\\])/g, '$1')
+  return value
+    .replace(/\\(['"`\\])/g, '$1')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
 }
 
 function findNextNonSpaceIndex(source: string, fromIndex: number): number {

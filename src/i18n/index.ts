@@ -1,7 +1,12 @@
 import { defineLocale } from './defineLocale.ts'
 
 export { defineLocale }
-export type { LocaleDefinition } from './defineLocale.ts'
+export type {
+  LocaleDefinition,
+  LocaleEntry,
+  LocaleMessageDefinition,
+  LocalePlaceholderDefinition,
+} from './defineLocale.ts'
 
 declare global {
   interface WebextI18nMessageIdMap {}
