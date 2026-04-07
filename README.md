@@ -105,8 +105,8 @@ Write extension code with `browser.*`.
 
 At build time, the plugin performs fully static namespace rewriting with MagicString:
 
-- `vite build --mode chrome` rewrites `browser.*` / `chrome.*` to `chrome.*`
-- `vite build --mode firefox` rewrites `browser.*` / `chrome.*` to `browser.*`
+- `vite build --mode chrome` rewrites `browser.*`  to `chrome.*`
+- `vite build --mode firefox` not rewrites `browser.*` to `browser.*`
 
 No runtime shim is injected.
 

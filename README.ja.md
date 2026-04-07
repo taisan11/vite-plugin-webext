@@ -103,8 +103,8 @@ export default defineConfig({
 
 ビルド時に MagicString で完全静的変換を行います。
 
-- `vite build --mode chrome` では `browser.*` / `chrome.*` を `chrome.*` へ統一
-- `vite build --mode firefox` では `browser.*` / `chrome.*` を `browser.*` へ統一
+- `vite build --mode chrome` では `browser.*` を `chrome.*` に変換
+- `vite build --mode firefox` では `browser.*`  を `browser.*` のままにします。
 
 ランタイム shim は注入しません。
 
