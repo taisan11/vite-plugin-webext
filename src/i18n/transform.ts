@@ -1,6 +1,13 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import MagicString from 'magic-string'
+import {
+  createMagicString,
+  finishMagicStringTransform,
+  type MagicStringLike,
+  type MagicStringMap,
+  type MagicStringOptions,
+} from '../magic-string.ts'
+import type { ApiNamespace } from '../browser/api-transform.ts'
 
 const DEFAULT_LOCALE_DIR = 'src/locale'
 const DEFAULT_DTS_NAME = 'webext-i18n.d.ts'
@@ -43,8 +50,12 @@ interface AstNode {
 interface RewriteI18nResult {
   count: number
   unknownIds: string[]
-  code: string
-  map: ReturnType<MagicString['generateMap']> | null
+  code: string | MagicStringLike
+  map: MagicStringMap | null
+}
+
+interface RewriteI18nOptions extends MagicStringOptions {
+  apiNamespace?: ApiNamespace
 }
 
 export function resolveI18nOptions(i18n?: boolean | I18nOptions): ResolvedI18nOptions {
@@ -104,6 +115,7 @@ export function rewriteI18nTCalls(
   code: string,
   parse: (source: string) => unknown,
   messageIds: Set<string>,
+  options: RewriteI18nOptions = {},
 ): RewriteI18nResult {
   if (!hasI18nImport(code)) {
     return { count: 0, unknownIds: [], code, map: null }
@@ -115,9 +127,10 @@ export function rewriteI18nTCalls(
     return { count: 0, unknownIds: [], code, map: null }
   }
 
-  const magic = new MagicString(code)
+  const magic = createMagicString(code, options)
   let count = 0
   const unknownIds = new Set<string>()
+  const apiNamespace = options.apiNamespace ?? 'browser'
 
   walkAst(ast, (node) => {
     if (node.type !== 'CallExpression') return
@@ -145,15 +158,14 @@ export function rewriteI18nTCalls(
       .filter((arg) => arg.length > 0)
       .join(', ')
 
-    magic.overwrite(callStart, callEnd, `browser.i18n.getMessage(${serializedArgs})`)
+    magic.overwrite(callStart, callEnd, `${apiNamespace}.i18n.getMessage(${serializedArgs})`)
     count++
   })
 
   return {
     count,
     unknownIds: [...unknownIds].sort(),
-    code: count > 0 ? magic.toString() : code,
-    map: count > 0 ? magic.generateMap({ hires: true }) : null,
+    ...finishMagicStringTransform(code, magic, count, options),
   }
 }
 

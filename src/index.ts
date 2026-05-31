@@ -9,6 +9,7 @@ import {
   hasUnavailableApiAccess,
   resolveApiNamespace,
   rewriteApiNamespaces,
+  type ApiNamespace,
 } from './browser/api-transform.ts'
 import {
   prepareI18nArtifacts,
@@ -16,6 +17,7 @@ import {
   rewriteI18nTCalls,
   type I18nOptions,
 } from './i18n/transform.ts'
+import type { MagicStringLike } from './magic-string.ts'
 import { rewriteMessagingCalls } from './messaging/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
 
@@ -68,6 +70,12 @@ export interface WebExtOptions {
   i18n?: boolean | I18nOptions
 }
 
+interface TransformContextLike {
+  parse(source: string): unknown
+  warn(message: string): void
+  error(message: string): never
+}
+
 export function webext(options: WebExtOptions): Plugin {
   const {
     defaultBrowser,
@@ -90,6 +98,104 @@ export function webext(options: WebExtOptions): Plugin {
   let browserOutDir = path.resolve(rootDir, 'dist')
   let distRootDir = browserOutDir
   let isBuild = false
+
+  function transformWithNativeMagicString(
+    this: TransformContextLike,
+    code: string,
+    id: string,
+    nativeMagicString: MagicStringLike,
+  ) {
+    const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null
+    const helperNamespace =
+      currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : 'browser'
+    let transformedCodeForChecks = code
+    let i18nRewriteCount = 0
+    let messagingRewriteCount = 0
+    let namespaceRewriteCount = 0
+
+    if (resolvedI18nOptions.enabled) {
+      const i18nRewritten = rewriteI18nTCalls(
+        code,
+        (source) => this.parse(source),
+        localeMessageIds,
+        {
+          apiNamespace: helperNamespace,
+          magicString: nativeMagicString,
+          returnMagicString: true,
+        },
+      )
+      if (i18nRewritten.unknownIds.length > 0) {
+        this.error(
+          `[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(', ')}\n` +
+            `  → ${id}\n` +
+            '  Define ids in src/locale/[localeName].ts using defineLocale({...}).',
+        )
+      }
+      if (i18nRewritten.count > 0) {
+        i18nRewriteCount = i18nRewritten.count
+        transformedCodeForChecks = nativeMagicString.toString()
+        this.warn(
+          `[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${helperNamespace}.i18n.getMessage(...)" in ${id}.`,
+        )
+      }
+    }
+
+    const messagingRewritten = rewriteMessagingCalls(code, (source) => this.parse(source), {
+      apiNamespace: helperNamespace,
+      magicString: nativeMagicString,
+      returnMagicString: true,
+    })
+    if (messagingRewritten.count > 0) {
+      messagingRewriteCount = messagingRewritten.count
+      transformedCodeForChecks = nativeMagicString.toString()
+      this.warn(
+        `[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`,
+      )
+    }
+
+    const hasNamespaceAccess = hasApiNamespaceAccess(transformedCodeForChecks)
+    if (!hasNamespaceAccess) {
+      if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
+      return { code: nativeMagicString as unknown as string, map: null }
+    }
+
+    const resolvedBrowser = requireBrowser(activeBrowser)
+    const unavailableApis =
+      resolvedBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
+
+    for (const api of unavailableApis) {
+      if (!hasUnavailableApiAccess(transformedCodeForChecks, api)) continue
+
+      const message =
+        `[vite-plugin-webext] API "${api}" is not available in ${resolvedBrowser}.\n` +
+        `  → ${id}`
+      if (unavailableApi === 'error') {
+        this.error(message)
+      } else if (unavailableApi === 'warn') {
+        this.warn(message)
+      }
+    }
+
+    if (shouldTransformNamespaces) {
+      const targetNamespace = resolveApiNamespace(resolvedBrowser)
+      const rewritten = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace, {
+        magicString: nativeMagicString,
+        returnMagicString: true,
+      })
+      namespaceRewriteCount = rewritten.count
+      if (namespaceRewriteCount > 0) {
+        this.warn(
+          `[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
+        )
+      }
+    }
+
+    if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) {
+      return null
+    }
+
+    return { code: nativeMagicString as unknown as string, map: null }
+  }
 
   return {
     name: 'vite-plugin-webext',
@@ -154,8 +260,13 @@ export function webext(options: WebExtOptions): Plugin {
       },
     },
 
-    transform(code, id) {
+    transform(code, id, meta) {
       if (id.includes('node_modules')) return null
+
+      const nativeMagicString = getNativeMagicString(meta)
+      if (nativeMagicString) {
+        return transformWithNativeMagicString.call(this, code, id, nativeMagicString)
+      }
 
       let transformedCode = code
       let transformedMap: ReturnType<typeof rewriteI18nTCalls>['map'] = null
@@ -176,7 +287,7 @@ export function webext(options: WebExtOptions): Plugin {
           )
         }
         if (i18nRewritten.count > 0) {
-          transformedCode = i18nRewritten.code
+          transformedCode = i18nRewritten.code.toString()
           transformedMap = i18nRewritten.map
           i18nRewriteCount = i18nRewritten.count
           this.warn(
@@ -187,7 +298,7 @@ export function webext(options: WebExtOptions): Plugin {
 
       const messagingRewritten = rewriteMessagingCalls(transformedCode, (source) => this.parse(source))
       if (messagingRewritten.count > 0) {
-        transformedCode = messagingRewritten.code
+        transformedCode = messagingRewritten.code.toString()
         transformedMap = i18nRewriteCount > 0 ? null : messagingRewritten.map
         messagingRewriteCount = messagingRewritten.count
         this.warn(
@@ -247,7 +358,7 @@ export function webext(options: WebExtOptions): Plugin {
       )
 
       return {
-        code: rewritten.code,
+        code: rewritten.code.toString(),
         map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map,
       }
     },
@@ -336,6 +447,19 @@ function requireBrowser(browser: BrowserTarget | null): BrowserTarget {
     throw new Error('[vite-plugin-webext] Browser target is not resolved.')
   }
   return browser
+}
+
+function getNativeMagicString(meta: unknown): MagicStringLike | null {
+  if (!meta || typeof meta !== 'object') return null
+  const magicString = (meta as { magicString?: unknown }).magicString
+  if (!magicString || typeof magicString !== 'object') return null
+
+  const candidate = magicString as Partial<MagicStringLike>
+  if (typeof candidate.overwrite !== 'function' || typeof candidate.toString !== 'function') {
+    return null
+  }
+
+  return candidate as MagicStringLike
 }
 
 function withBrowserSubDir(outDir: string, browser: BrowserTarget): string {

@@ -1,4 +1,11 @@
-import MagicString from 'magic-string'
+import {
+  createMagicString,
+  finishMagicStringTransform,
+  type MagicStringLike,
+  type MagicStringMap,
+  type MagicStringOptions,
+} from '../magic-string.ts'
+import type { ApiNamespace } from '../browser/api-transform.ts'
 
 const MESSAGING_IMPORT_SOURCES = new Set([
   '@taisan11/vite-plugin-webext/messaging',
@@ -26,11 +33,19 @@ interface AstNode {
 
 interface RewriteMessagingResult {
   count: number
-  code: string
-  map: ReturnType<MagicString['generateMap']> | null
+  code: string | MagicStringLike
+  map: MagicStringMap | null
 }
 
-export function rewriteMessagingCalls(code: string, parse: (source: string) => unknown): RewriteMessagingResult {
+interface RewriteMessagingOptions extends MagicStringOptions {
+  apiNamespace?: ApiNamespace
+}
+
+export function rewriteMessagingCalls(
+  code: string,
+  parse: (source: string) => unknown,
+  options: RewriteMessagingOptions = {},
+): RewriteMessagingResult {
   if (!hasMessagingImport(code)) {
     return { count: 0, code, map: null }
   }
@@ -41,8 +56,9 @@ export function rewriteMessagingCalls(code: string, parse: (source: string) => u
     return { count: 0, code, map: null }
   }
 
-  const magic = new MagicString(code)
+  const magic = createMagicString(code, options)
   let count = 0
+  const apiNamespace = options.apiNamespace ?? 'browser'
 
   walkAst(ast, (node) => {
     if (node.type !== 'CallExpression') return
@@ -51,7 +67,7 @@ export function rewriteMessagingCalls(code: string, parse: (source: string) => u
     if (!operation) return
 
     const args = (Array.isArray(node.arguments) ? node.arguments : []) as AstNode[]
-    const replacement = renderMessagingReplacement(operation, args, code)
+    const replacement = renderMessagingReplacement(operation, args, code, apiNamespace)
     if (!replacement) return
 
     if (typeof node.start !== 'number' || typeof node.end !== 'number') return
@@ -61,8 +77,7 @@ export function rewriteMessagingCalls(code: string, parse: (source: string) => u
 
   return {
     count,
-    code: count > 0 ? magic.toString() : code,
-    map: count > 0 ? magic.generateMap({ hires: true }) : null,
+    ...finishMagicStringTransform(code, magic, count, options),
   }
 }
 
@@ -145,6 +160,7 @@ function renderMessagingReplacement(
   operation: MessagingOperation,
   args: AstNode[],
   code: string,
+  apiNamespace: ApiNamespace,
 ): string | null {
   if (operation === 'runtime') {
     const typeArg = args[0]
@@ -161,8 +177,8 @@ function renderMessagingReplacement(
 
     const messageObject = `{ type: ${typeSource}, payload: ${payloadSource} }`
     return optionsSource
-      ? `browser.runtime.sendMessage(${messageObject}, ${optionsSource})`
-      : `browser.runtime.sendMessage(${messageObject})`
+      ? `${apiNamespace}.runtime.sendMessage(${messageObject}, ${optionsSource})`
+      : `${apiNamespace}.runtime.sendMessage(${messageObject})`
   }
 
   const tabIdArg = args[0]
@@ -183,8 +199,8 @@ function renderMessagingReplacement(
 
   const messageObject = `{ type: ${typeSource}, payload: ${payloadSource} }`
   return optionsSource
-    ? `browser.tabs.sendMessage(${tabIdSource}, ${messageObject}, ${optionsSource})`
-    : `browser.tabs.sendMessage(${tabIdSource}, ${messageObject})`
+    ? `${apiNamespace}.tabs.sendMessage(${tabIdSource}, ${messageObject}, ${optionsSource})`
+    : `${apiNamespace}.tabs.sendMessage(${tabIdSource}, ${messageObject})`
 }
 
 function sliceNode(code: string, node: AstNode): string {
@@ -210,4 +226,3 @@ function walkAst(node: unknown, visit: (node: AstNode) => void) {
     walkAst(value, visit)
   }
 }
-

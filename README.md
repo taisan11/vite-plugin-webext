@@ -110,6 +110,8 @@ At build time, the plugin performs fully static namespace rewriting with MagicSt
 
 No runtime shim is injected.
 
+When running on Rolldown with `experimental.nativeMagicString: true`, the plugin automatically uses the native `meta.magicString` object when it is available and falls back to the JavaScript `magic-string` package otherwise.
+
 ## TypeScript setup for `browser.*`
 
 Create `src/env.d.ts` in your extension project and add:

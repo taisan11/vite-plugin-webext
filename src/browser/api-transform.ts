@@ -1,4 +1,10 @@
-import MagicString from 'magic-string'
+import {
+  createMagicString,
+  finishMagicStringTransform,
+  type MagicStringLike,
+  type MagicStringMap,
+  type MagicStringOptions,
+} from '../magic-string.ts'
 
 type BrowserTarget = 'chrome' | 'firefox'
 
@@ -67,9 +73,10 @@ export function rewriteApiNamespaces(
   code: string,
   parse: (source: string) => unknown,
   targetNamespace: ApiNamespace,
+  options: MagicStringOptions = {},
 ) {
   const ast = parse(code) as AstNode
-  const magic = new MagicString(code)
+  const magic = createMagicString(code, options)
   let count = 0
 
   walkAst(ast, (node) => {
@@ -92,8 +99,11 @@ export function rewriteApiNamespaces(
 
   return {
     count,
-    code: count > 0 ? magic.toString() : code,
-    map: count > 0 ? magic.generateMap({ hires: true }) : null,
+    ...finishMagicStringTransform(code, magic, count, options),
+  } as {
+    count: number
+    code: string | MagicStringLike
+    map: MagicStringMap | null
   }
 }
 

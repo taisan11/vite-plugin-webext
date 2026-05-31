@@ -108,6 +108,8 @@ export default defineConfig({
 
 ランタイム shim は注入しません。
 
+Rolldown 側で `experimental.nativeMagicString: true` が有効な場合、このプラグインは利用可能な `meta.magicString` を自動利用します。利用できない環境では従来どおり JavaScript の `magic-string` にフォールバックします。
+
 ## `browser.*` の型を有効化する方法
 
 拡張機能側のプロジェクトに `src/env.d.ts` を作成し、次を追加してください。

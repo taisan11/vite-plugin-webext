@@ -2,6 +2,29 @@ import { promises } from "node:fs";
 import path from "node:path";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import MagicString from "magic-string";
+//#region src/magic-string.ts
+function createMagicString(code, options = {}) {
+	return options.magicString ?? new MagicString(code);
+}
+function finishMagicStringTransform(code, magic, count, options = {}) {
+	if (count === 0) return {
+		code,
+		map: null
+	};
+	if (options.returnMagicString) return {
+		code: magic,
+		map: null
+	};
+	return {
+		code: magic.toString(),
+		map: generateMap(magic)
+	};
+}
+function generateMap(magic) {
+	const map = magic.generateMap?.({ hires: true });
+	return map == null ? null : map;
+}
+//#endregion
 //#region src/browser/api-transform.ts
 const CHROME_ONLY_APIS = [
 	"offscreen",
@@ -46,9 +69,9 @@ function hasUnavailableApiAccess(code, api) {
 function resolveApiNamespace(browser) {
 	return browser === "chrome" ? "chrome" : "browser";
 }
-function rewriteApiNamespaces(code, parse, targetNamespace) {
+function rewriteApiNamespaces(code, parse, targetNamespace, options = {}) {
 	const ast = parse(code);
-	const magic = new MagicString(code);
+	const magic = createMagicString(code, options);
 	let count = 0;
 	walkAst$2(ast, (node) => {
 		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
@@ -60,8 +83,7 @@ function rewriteApiNamespaces(code, parse, targetNamespace) {
 	});
 	return {
 		count,
-		code: count > 0 ? magic.toString() : code,
-		map: count > 0 ? magic.generateMap({ hires: true }) : null
+		...finishMagicStringTransform(code, magic, count, options)
 	};
 }
 function walkAst$2(node, visit) {
@@ -127,7 +149,7 @@ async function prepareI18nArtifacts(rootDir, options) {
 	await promises.writeFile(generatedDtsPath, renderLocaleMessageIdDts(messageIds));
 	return { messageIds };
 }
-function rewriteI18nTCalls(code, parse, messageIds) {
+function rewriteI18nTCalls(code, parse, messageIds, options = {}) {
 	if (!hasI18nImport(code)) return {
 		count: 0,
 		unknownIds: [],
@@ -142,9 +164,10 @@ function rewriteI18nTCalls(code, parse, messageIds) {
 		code,
 		map: null
 	};
-	const magic = new MagicString(code);
+	const magic = createMagicString(code, options);
 	let count = 0;
 	const unknownIds = /* @__PURE__ */ new Set();
+	const apiNamespace = options.apiNamespace ?? "browser";
 	walkAst$1(ast, (node) => {
 		if (node.type !== "CallExpression") return;
 		if (!isTCallExpression(node, callTargets)) return;
@@ -162,14 +185,13 @@ function rewriteI18nTCalls(code, parse, messageIds) {
 			if (typeof arg.start !== "number" || typeof arg.end !== "number") return "";
 			return code.slice(arg.start, arg.end);
 		}).filter((arg) => arg.length > 0).join(", ");
-		magic.overwrite(callStart, callEnd, `browser.i18n.getMessage(${serializedArgs})`);
+		magic.overwrite(callStart, callEnd, `${apiNamespace}.i18n.getMessage(${serializedArgs})`);
 		count++;
 	});
 	return {
 		count,
 		unknownIds: [...unknownIds].sort(),
-		code: count > 0 ? magic.toString() : code,
-		map: count > 0 ? magic.generateMap({ hires: true }) : null
+		...finishMagicStringTransform(code, magic, count, options)
 	};
 }
 function hasI18nImport(code) {
@@ -543,7 +565,7 @@ function normalizePath$1(filePath) {
 //#endregion
 //#region src/messaging/transform.ts
 const MESSAGING_IMPORT_SOURCES = new Set(["@taisan11/vite-plugin-webext/messaging", "@taisan11/vite-plugin-webext/src/messaging"]);
-function rewriteMessagingCalls(code, parse) {
+function rewriteMessagingCalls(code, parse, options = {}) {
 	if (!hasMessagingImport(code)) return {
 		count: 0,
 		code,
@@ -556,13 +578,14 @@ function rewriteMessagingCalls(code, parse) {
 		code,
 		map: null
 	};
-	const magic = new MagicString(code);
+	const magic = createMagicString(code, options);
 	let count = 0;
+	const apiNamespace = options.apiNamespace ?? "browser";
 	walkAst(ast, (node) => {
 		if (node.type !== "CallExpression") return;
 		const operation = resolveMessagingOperation(node, callTargets);
 		if (!operation) return;
-		const replacement = renderMessagingReplacement(operation, Array.isArray(node.arguments) ? node.arguments : [], code);
+		const replacement = renderMessagingReplacement(operation, Array.isArray(node.arguments) ? node.arguments : [], code, apiNamespace);
 		if (!replacement) return;
 		if (typeof node.start !== "number" || typeof node.end !== "number") return;
 		magic.overwrite(node.start, node.end, replacement);
@@ -570,8 +593,7 @@ function rewriteMessagingCalls(code, parse) {
 	});
 	return {
 		count,
-		code: count > 0 ? magic.toString() : code,
-		map: count > 0 ? magic.generateMap({ hires: true }) : null
+		...finishMagicStringTransform(code, magic, count, options)
 	};
 }
 function hasMessagingImport(code) {
@@ -620,7 +642,7 @@ function resolveMessagingOperation(node, callTargets) {
 	}
 	return null;
 }
-function renderMessagingReplacement(operation, args, code) {
+function renderMessagingReplacement(operation, args, code, apiNamespace) {
 	if (operation === "runtime") {
 		const typeArg = args[0];
 		const payloadArg = args[1];
@@ -632,7 +654,7 @@ function renderMessagingReplacement(operation, args, code) {
 		const optionsSource = args[2] ? sliceNode(code, args[2]) : "";
 		if (args[2] && !optionsSource) return null;
 		const messageObject = `{ type: ${typeSource}, payload: ${payloadSource} }`;
-		return optionsSource ? `browser.runtime.sendMessage(${messageObject}, ${optionsSource})` : `browser.runtime.sendMessage(${messageObject})`;
+		return optionsSource ? `${apiNamespace}.runtime.sendMessage(${messageObject}, ${optionsSource})` : `${apiNamespace}.runtime.sendMessage(${messageObject})`;
 	}
 	const tabIdArg = args[0];
 	const typeArg = args[1];
@@ -646,7 +668,7 @@ function renderMessagingReplacement(operation, args, code) {
 	const optionsSource = args[3] ? sliceNode(code, args[3]) : "";
 	if (args[3] && !optionsSource) return null;
 	const messageObject = `{ type: ${typeSource}, payload: ${payloadSource} }`;
-	return optionsSource ? `browser.tabs.sendMessage(${tabIdSource}, ${messageObject}, ${optionsSource})` : `browser.tabs.sendMessage(${tabIdSource}, ${messageObject})`;
+	return optionsSource ? `${apiNamespace}.tabs.sendMessage(${tabIdSource}, ${messageObject}, ${optionsSource})` : `${apiNamespace}.tabs.sendMessage(${tabIdSource}, ${messageObject})`;
 }
 function sliceNode(code, node) {
 	if (typeof node.start !== "number" || typeof node.end !== "number") return "";
@@ -680,6 +702,65 @@ function webext(options) {
 	let browserOutDir = path.resolve(rootDir, "dist");
 	let distRootDir = browserOutDir;
 	let isBuild = false;
+	function transformWithNativeMagicString(code, id, nativeMagicString) {
+		const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null;
+		const helperNamespace = currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : "browser";
+		let transformedCodeForChecks = code;
+		let i18nRewriteCount = 0;
+		let messagingRewriteCount = 0;
+		let namespaceRewriteCount = 0;
+		if (resolvedI18nOptions.enabled) {
+			const i18nRewritten = rewriteI18nTCalls(code, (source) => this.parse(source), localeMessageIds, {
+				apiNamespace: helperNamespace,
+				magicString: nativeMagicString,
+				returnMagicString: true
+			});
+			if (i18nRewritten.unknownIds.length > 0) this.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
+			if (i18nRewritten.count > 0) {
+				i18nRewriteCount = i18nRewritten.count;
+				transformedCodeForChecks = nativeMagicString.toString();
+				this.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${helperNamespace}.i18n.getMessage(...)" in ${id}.`);
+			}
+		}
+		const messagingRewritten = rewriteMessagingCalls(code, (source) => this.parse(source), {
+			apiNamespace: helperNamespace,
+			magicString: nativeMagicString,
+			returnMagicString: true
+		});
+		if (messagingRewritten.count > 0) {
+			messagingRewriteCount = messagingRewritten.count;
+			transformedCodeForChecks = nativeMagicString.toString();
+			this.warn(`[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`);
+		}
+		if (!hasApiNamespaceAccess(transformedCodeForChecks)) {
+			if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
+			return {
+				code: nativeMagicString,
+				map: null
+			};
+		}
+		const resolvedBrowser = requireBrowser(activeBrowser);
+		const unavailableApis = resolvedBrowser === "chrome" ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS;
+		for (const api of unavailableApis) {
+			if (!hasUnavailableApiAccess(transformedCodeForChecks, api)) continue;
+			const message = `[vite-plugin-webext] API "${api}" is not available in ${resolvedBrowser}.\n  → ${id}`;
+			if (unavailableApi === "error") this.error(message);
+			else if (unavailableApi === "warn") this.warn(message);
+		}
+		if (shouldTransformNamespaces) {
+			const targetNamespace = resolveApiNamespace(resolvedBrowser);
+			namespaceRewriteCount = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace, {
+				magicString: nativeMagicString,
+				returnMagicString: true
+			}).count;
+			if (namespaceRewriteCount > 0) this.warn(`[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
+		}
+		if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null;
+		return {
+			code: nativeMagicString,
+			map: null
+		};
+	}
 	return {
 		name: "vite-plugin-webext",
 		enforce: "pre",
@@ -721,8 +802,10 @@ function webext(options) {
 				});
 			}
 		},
-		transform(code, id) {
+		transform(code, id, meta) {
 			if (id.includes("node_modules")) return null;
+			const nativeMagicString = getNativeMagicString(meta);
+			if (nativeMagicString) return transformWithNativeMagicString.call(this, code, id, nativeMagicString);
 			let transformedCode = code;
 			let transformedMap = null;
 			let i18nRewriteCount = 0;
@@ -731,7 +814,7 @@ function webext(options) {
 				const i18nRewritten = rewriteI18nTCalls(transformedCode, (source) => this.parse(source), localeMessageIds);
 				if (i18nRewritten.unknownIds.length > 0) this.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
 				if (i18nRewritten.count > 0) {
-					transformedCode = i18nRewritten.code;
+					transformedCode = i18nRewritten.code.toString();
 					transformedMap = i18nRewritten.map;
 					i18nRewriteCount = i18nRewritten.count;
 					this.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "browser.i18n.getMessage(...)" in ${id}.`);
@@ -739,7 +822,7 @@ function webext(options) {
 			}
 			const messagingRewritten = rewriteMessagingCalls(transformedCode, (source) => this.parse(source));
 			if (messagingRewritten.count > 0) {
-				transformedCode = messagingRewritten.code;
+				transformedCode = messagingRewritten.code.toString();
 				transformedMap = i18nRewriteCount > 0 ? null : messagingRewritten.map;
 				messagingRewriteCount = messagingRewritten.count;
 				this.warn(`[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`);
@@ -777,7 +860,7 @@ function webext(options) {
 			}
 			this.warn(`[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
 			return {
-				code: rewritten.code,
+				code: rewritten.code.toString(),
 				map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map
 			};
 		},
@@ -819,6 +902,14 @@ function parseBrowserMode(mode) {
 function requireBrowser(browser) {
 	if (!browser) throw new Error("[vite-plugin-webext] Browser target is not resolved.");
 	return browser;
+}
+function getNativeMagicString(meta) {
+	if (!meta || typeof meta !== "object") return null;
+	const magicString = meta.magicString;
+	if (!magicString || typeof magicString !== "object") return null;
+	const candidate = magicString;
+	if (typeof candidate.overwrite !== "function" || typeof candidate.toString !== "function") return null;
+	return candidate;
 }
 function withBrowserSubDir(outDir, browser) {
 	if (path.basename(outDir) === browser) return outDir;
