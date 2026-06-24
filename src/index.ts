@@ -224,7 +224,6 @@ export function webext(options: WebExtOptions): Plugin {
 
   return {
     name: 'vite-plugin-webext',
-    enforce: 'pre',
 
     config(userConfig, configEnv): UserConfig {
       isBuild = configEnv.command === 'build'
