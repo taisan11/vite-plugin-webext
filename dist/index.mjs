@@ -25,6 +25,22 @@ function generateMap(magic) {
 	return map == null ? null : map;
 }
 //#endregion
+//#region src/utils/ast.ts
+function walkAst(node, visit) {
+	if (!node || typeof node !== "object") return;
+	const astNode = node;
+	if (!astNode.type) return;
+	visit(astNode);
+	for (const value of Object.values(astNode)) {
+		if (!value) continue;
+		if (Array.isArray(value)) {
+			for (const item of value) walkAst(item, visit);
+			continue;
+		}
+		walkAst(value, visit);
+	}
+}
+//#endregion
 //#region src/browser/api-transform.ts
 const CHROME_ONLY_APIS = [
 	"offscreen",
@@ -41,7 +57,6 @@ const CHROME_ONLY_APIS = [
 	"systemLog",
 	"topSites",
 	"ttsEngine",
-	"userScripts",
 	"vpnProvider",
 	"wallpaper",
 	"webAuthenticationProxy"
@@ -57,8 +72,7 @@ const FIREFOX_ONLY_APIS = [
 	"normandyAddonStudy",
 	"pkcs11",
 	"proxy",
-	"telemetry",
-	"userScripts"
+	"telemetry"
 ];
 function hasApiNamespaceAccess(code) {
 	return /\b(?:browser|chrome)\s*(?:\.|\?\.)/.test(code);
@@ -73,7 +87,7 @@ function rewriteApiNamespaces(code, parse, targetNamespace, options = {}) {
 	const ast = parse(code);
 	const magic = createMagicString(code, options);
 	let count = 0;
-	walkAst$2(ast, (node) => {
+	walkAst(ast, (node) => {
 		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
 		const object = node.object;
 		if (object?.type === "Identifier" && (object.name === "chrome" || object.name === "browser") && object.name !== targetNamespace && typeof object.start === "number" && typeof object.end === "number") {
@@ -86,22 +100,13 @@ function rewriteApiNamespaces(code, parse, targetNamespace, options = {}) {
 		...finishMagicStringTransform(code, magic, count, options)
 	};
 }
-function walkAst$2(node, visit) {
-	if (!node || typeof node !== "object") return;
-	const astNode = node;
-	if (!astNode.type) return;
-	visit(astNode);
-	for (const value of Object.values(astNode)) {
-		if (!value) continue;
-		if (Array.isArray(value)) {
-			for (const item of value) walkAst$2(item, visit);
-			continue;
-		}
-		walkAst$2(value, visit);
-	}
-}
 function escapeRe(s) {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+//#endregion
+//#region src/utils/path.ts
+function normalizePath(filePath) {
+	return filePath.split(path.sep).join("/");
 }
 //#endregion
 //#region src/i18n/transform.ts
@@ -122,18 +127,18 @@ function resolveI18nOptions(i18n) {
 	if (i18n === false || i18n == null) return {
 		enabled: false,
 		localeDir: DEFAULT_LOCALE_DIR,
-		generatedDtsPath: normalizePath$1(path.join(DEFAULT_LOCALE_DIR, DEFAULT_DTS_NAME))
+		generatedDtsPath: normalizePath(path.join(DEFAULT_LOCALE_DIR, DEFAULT_DTS_NAME))
 	};
 	if (i18n === true) return {
 		enabled: true,
 		localeDir: DEFAULT_LOCALE_DIR,
-		generatedDtsPath: normalizePath$1(path.join(DEFAULT_LOCALE_DIR, DEFAULT_DTS_NAME))
+		generatedDtsPath: normalizePath(path.join(DEFAULT_LOCALE_DIR, DEFAULT_DTS_NAME))
 	};
-	const localeDir = normalizePath$1(i18n.localeDir?.trim() || DEFAULT_LOCALE_DIR);
+	const localeDir = normalizePath(i18n.localeDir?.trim() || DEFAULT_LOCALE_DIR);
 	return {
 		enabled: i18n.enabled ?? true,
 		localeDir,
-		generatedDtsPath: normalizePath$1(path.join(localeDir, DEFAULT_DTS_NAME))
+		generatedDtsPath: normalizePath(path.join(localeDir, DEFAULT_DTS_NAME))
 	};
 }
 async function prepareI18nArtifacts(rootDir, options) {
@@ -168,7 +173,7 @@ function rewriteI18nTCalls(code, parse, messageIds, options = {}) {
 	let count = 0;
 	const unknownIds = /* @__PURE__ */ new Set();
 	const apiNamespace = options.apiNamespace ?? "browser";
-	walkAst$1(ast, (node) => {
+	walkAst(ast, (node) => {
 		if (node.type !== "CallExpression") return;
 		if (!isTCallExpression(node, callTargets)) return;
 		const args = Array.isArray(node.arguments) ? node.arguments : [];
@@ -200,7 +205,7 @@ function hasI18nImport(code) {
 function collectImportedTCallTargets(ast) {
 	const direct = /* @__PURE__ */ new Set();
 	const namespaces = /* @__PURE__ */ new Set();
-	walkAst$1(ast, (node) => {
+	walkAst(ast, (node) => {
 		if (node.type !== "ImportDeclaration") return;
 		const source = node.source;
 		if (typeof source?.value !== "string" || !I18N_IMPORT_SOURCES.has(source.value)) return;
@@ -240,19 +245,15 @@ function getStaticMessageId(node) {
 	const first = (Array.isArray(node.quasis) ? node.quasis : [])[0];
 	return typeof first?.value?.cooked === "string" ? first.value.cooked : null;
 }
-function walkAst$1(node, visit) {
-	if (!node || typeof node !== "object") return;
-	const astNode = node;
-	if (!astNode.type) return;
-	visit(astNode);
-	for (const value of Object.values(astNode)) {
-		if (!value) continue;
-		if (Array.isArray(value)) {
-			for (const item of value) walkAst$1(item, visit);
-			continue;
-		}
-		walkAst$1(value, visit);
-	}
+function renderLocaleMessageIdDts(messageIds) {
+	const lines = [...messageIds].sort((a, b) => a.localeCompare(b)).map((id) => `    ${JSON.stringify(id)}: true`);
+	return `// Auto-generated by vite-plugin-webext. Do not edit.
+declare global {
+  interface WebextI18nMessageIdMap {
+${lines.join("\n")}${lines.length > 0 ? "\n" : ""}  }
+}
+export {}
+`;
 }
 async function readLocaleFiles(localeDir) {
 	let entries;
@@ -549,19 +550,6 @@ function findMatchingBrace(source, openIndex) {
 	}
 	return -1;
 }
-function renderLocaleMessageIdDts(messageIds) {
-	const lines = [...messageIds].sort((a, b) => a.localeCompare(b)).map((id) => `    ${JSON.stringify(id)}: true`);
-	return `// Auto-generated by vite-plugin-webext. Do not edit.
-declare global {
-  interface WebextI18nMessageIdMap {
-${lines.join("\n")}${lines.length > 0 ? "\n" : ""}  }
-}
-export {}
-`;
-}
-function normalizePath$1(filePath) {
-	return filePath.split(path.sep).join("/");
-}
 //#endregion
 //#region src/messaging/transform.ts
 const MESSAGING_IMPORT_SOURCES = new Set(["@taisan11/vite-plugin-webext/messaging", "@taisan11/vite-plugin-webext/src/messaging"]);
@@ -674,20 +662,6 @@ function sliceNode(code, node) {
 	if (typeof node.start !== "number" || typeof node.end !== "number") return "";
 	return code.slice(node.start, node.end);
 }
-function walkAst(node, visit) {
-	if (!node || typeof node !== "object") return;
-	const astNode = node;
-	if (!astNode.type) return;
-	visit(astNode);
-	for (const value of Object.values(astNode)) {
-		if (!value) continue;
-		if (Array.isArray(value)) {
-			for (const item of value) walkAst(item, visit);
-			continue;
-		}
-		walkAst(value, visit);
-	}
-}
 //#endregion
 //#region src/index.ts
 function webext(options) {
@@ -702,68 +676,93 @@ function webext(options) {
 	let browserOutDir = path.resolve(rootDir, "dist");
 	let distRootDir = browserOutDir;
 	let isBuild = false;
-	function transformWithNativeMagicString(code, id, nativeMagicString) {
-		const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null;
-		const helperNamespace = currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : "browser";
+	function runTransformPipeline(pipeline) {
+		const { ctx, code, id, parse, magic, apiNamespace } = pipeline;
 		let transformedCodeForChecks = code;
 		let i18nRewriteCount = 0;
 		let messagingRewriteCount = 0;
 		let namespaceRewriteCount = 0;
 		if (resolvedI18nOptions.enabled) {
-			const i18nRewritten = rewriteI18nTCalls(code, (source) => this.parse(source), localeMessageIds, {
-				apiNamespace: helperNamespace,
-				magicString: nativeMagicString,
+			const i18nRewritten = rewriteI18nTCalls(code, parse, localeMessageIds, magic ? {
+				apiNamespace,
+				magicString: magic,
 				returnMagicString: true
-			});
-			if (i18nRewritten.unknownIds.length > 0) this.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
+			} : { apiNamespace });
+			if (i18nRewritten.unknownIds.length > 0) ctx.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
 			if (i18nRewritten.count > 0) {
 				i18nRewriteCount = i18nRewritten.count;
-				transformedCodeForChecks = nativeMagicString.toString();
-				this.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${helperNamespace}.i18n.getMessage(...)" in ${id}.`);
+				transformedCodeForChecks = magic ? magic.toString() : i18nRewritten.code.toString();
+				ctx.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${apiNamespace}.i18n.getMessage(...)" in ${id}.`);
 			}
 		}
-		const messagingRewritten = rewriteMessagingCalls(code, (source) => this.parse(source), {
-			apiNamespace: helperNamespace,
-			magicString: nativeMagicString,
+		const messagingRewritten = rewriteMessagingCalls(magic ? code : transformedCodeForChecks, parse, magic ? {
+			apiNamespace,
+			magicString: magic,
 			returnMagicString: true
-		});
+		} : { apiNamespace });
 		if (messagingRewritten.count > 0) {
 			messagingRewriteCount = messagingRewritten.count;
-			transformedCodeForChecks = nativeMagicString.toString();
-			this.warn(`[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`);
+			transformedCodeForChecks = magic ? magic.toString() : messagingRewritten.code.toString();
+			ctx.warn(`[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`);
 		}
 		if (!hasApiNamespaceAccess(transformedCodeForChecks)) {
 			if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
-			return {
-				code: nativeMagicString,
+			if (magic) return {
+				code: magic,
 				map: null
 			};
+			return {
+				code: transformedCodeForChecks,
+				map: i18nRewriteCount > 0 ? null : messagingRewritten.map
+			};
 		}
-		const resolvedBrowser = requireBrowser(activeBrowser);
-		const unavailableApis = resolvedBrowser === "chrome" ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS;
+		const currentBrowser = requireBrowser(activeBrowser);
+		const unavailableApis = currentBrowser === "chrome" ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS;
 		for (const api of unavailableApis) {
 			if (!hasUnavailableApiAccess(transformedCodeForChecks, api)) continue;
-			const message = `[vite-plugin-webext] API "${api}" is not available in ${resolvedBrowser}.\n  → ${id}`;
-			if (unavailableApi === "error") this.error(message);
-			else if (unavailableApi === "warn") this.warn(message);
+			const message = `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n  → ${id}`;
+			if (unavailableApi === "error") ctx.error(message);
+			else if (unavailableApi === "warn") ctx.warn(message);
 		}
 		if (shouldTransformNamespaces) {
-			const targetNamespace = resolveApiNamespace(resolvedBrowser);
-			namespaceRewriteCount = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace, {
-				magicString: nativeMagicString,
+			const targetNamespace = resolveApiNamespace(currentBrowser);
+			const rewritten = rewriteApiNamespaces(magic ? code : transformedCodeForChecks, parse, targetNamespace, magic ? {
+				magicString: magic,
 				returnMagicString: true
-			}).count;
-			if (namespaceRewriteCount > 0) this.warn(`[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
+			} : {});
+			namespaceRewriteCount = rewritten.count;
+			if (namespaceRewriteCount > 0) ctx.warn(`[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
+			if (magic) {
+				if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null;
+				return {
+					code: magic,
+					map: null
+				};
+			}
+			if (rewritten.count === 0) {
+				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
+				return {
+					code: transformedCodeForChecks,
+					map: null
+				};
+			}
+			return {
+				code: rewritten.code.toString(),
+				map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map
+			};
 		}
-		if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null;
-		return {
-			code: nativeMagicString,
+		if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
+		if (magic) return {
+			code: magic,
 			map: null
+		};
+		return {
+			code: transformedCodeForChecks,
+			map: i18nRewriteCount > 0 ? null : messagingRewritten.map
 		};
 	}
 	return {
 		name: "vite-plugin-webext",
-		enforce: "pre",
 		config(userConfig, configEnv) {
 			isBuild = configEnv.command === "build";
 			activeBrowser = resolveBrowserTarget(configEnv.mode, configuredDefaultBrowser);
@@ -804,64 +803,25 @@ function webext(options) {
 		},
 		transform(code, id, meta) {
 			if (id.includes("node_modules")) return null;
+			const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null;
+			const apiNamespace = currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : "browser";
 			const nativeMagicString = getNativeMagicString(meta);
-			if (nativeMagicString) return transformWithNativeMagicString.call(this, code, id, nativeMagicString);
-			let transformedCode = code;
-			let transformedMap = null;
-			let i18nRewriteCount = 0;
-			let messagingRewriteCount = 0;
-			if (resolvedI18nOptions.enabled) {
-				const i18nRewritten = rewriteI18nTCalls(transformedCode, (source) => this.parse(source), localeMessageIds);
-				if (i18nRewritten.unknownIds.length > 0) this.error(`[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(", ")}\n  → ${id}\n  Define ids in src/locale/[localeName].ts using defineLocale({...}).`);
-				if (i18nRewritten.count > 0) {
-					transformedCode = i18nRewritten.code.toString();
-					transformedMap = i18nRewritten.map;
-					i18nRewriteCount = i18nRewritten.count;
-					this.warn(`[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "browser.i18n.getMessage(...)" in ${id}.`);
-				}
-			}
-			const messagingRewritten = rewriteMessagingCalls(transformedCode, (source) => this.parse(source));
-			if (messagingRewritten.count > 0) {
-				transformedCode = messagingRewritten.code.toString();
-				transformedMap = i18nRewriteCount > 0 ? null : messagingRewritten.map;
-				messagingRewriteCount = messagingRewritten.count;
-				this.warn(`[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`);
-			}
-			if (!hasApiNamespaceAccess(transformedCode)) {
-				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
-				return {
-					code: transformedCode,
-					map: transformedMap
-				};
-			}
-			const currentBrowser = requireBrowser(activeBrowser);
-			const unavailableApis = currentBrowser === "chrome" ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS;
-			for (const api of unavailableApis) {
-				if (!hasUnavailableApiAccess(transformedCode, api)) continue;
-				const message = `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n  → ${id}`;
-				if (unavailableApi === "error") this.error(message);
-				else if (unavailableApi === "warn") this.warn(message);
-			}
-			if (!shouldTransformNamespaces) {
-				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
-				return {
-					code: transformedCode,
-					map: transformedMap
-				};
-			}
-			const targetNamespace = resolveApiNamespace(currentBrowser);
-			const rewritten = rewriteApiNamespaces(transformedCode, (source) => this.parse(source), targetNamespace);
-			if (rewritten.count === 0) {
-				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
-				return {
-					code: transformedCode,
-					map: transformedMap
-				};
-			}
-			this.warn(`[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
+			const result = runTransformPipeline({
+				ctx: this,
+				code,
+				id,
+				parse: (source) => this.parse(source),
+				magic: nativeMagicString ?? void 0,
+				apiNamespace
+			});
+			if (!result) return null;
+			if (nativeMagicString) return {
+				code: nativeMagicString,
+				map: result.map
+			};
 			return {
-				code: rewritten.code.toString(),
-				map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map
+				code: result.code,
+				map: result.map
 			};
 		},
 		async closeBundle() {
@@ -1008,9 +968,6 @@ function isExternalSpecifier(value) {
 function normalizeSourcePath(filePath) {
 	return normalizePath(filePath).replace(/^\.\/+/, "").replace(/^\/+/, "");
 }
-function normalizePath(filePath) {
-	return filePath.split(path.sep).join("/");
-}
 function sanitizeVersionForFileName(version) {
 	return version.replace(/[^A-Za-z0-9._-]/g, "_");
 }
@@ -1078,15 +1035,9 @@ async function collectZipEntries(rootDirectory, currentDirectory, shouldInclude)
 }
 async function writeZip(outputPath, entries) {
 	const zipWriter = new ZipWriter(new Uint8ArrayWriter());
-	let closed = false;
-	try {
-		for (const entry of entries) await zipWriter.add(entry.name, new Uint8ArrayReader(entry.data));
-		const zipData = await zipWriter.close();
-		closed = true;
-		await promises.writeFile(outputPath, Buffer.from(zipData));
-	} finally {
-		if (!closed) await zipWriter.close().catch(() => void 0);
-	}
+	for (const entry of entries) await zipWriter.add(entry.name, new Uint8ArrayReader(entry.data));
+	const zipData = await zipWriter.close();
+	await promises.writeFile(outputPath, Buffer.from(zipData));
 }
 function shouldIncludeSourceEntry(relativePath) {
 	return !relativePath.split(path.sep).some((segment) => segment === "node_modules" || segment === "dist" || segment === ".git" || segment === ".copilot");
