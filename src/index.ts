@@ -20,6 +20,7 @@ import {
 import type { MagicStringLike } from './magic-string.ts'
 import { rewriteMessagingCalls } from './messaging/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
+import { normalizePath } from './utils/path.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
 export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
@@ -76,6 +77,20 @@ interface TransformContextLike {
   error(message: string): never
 }
 
+interface TransformPipelineContext {
+  ctx: TransformContextLike
+  code: string
+  id: string
+  parse: (source: string) => unknown
+  magic?: MagicStringLike
+  apiNamespace: ApiNamespace
+}
+
+interface TransformPipelineResult {
+  code: string | MagicStringLike
+  map: { mappings: string } | null
+}
+
 export function webext(options: WebExtOptions): Plugin {
   const {
     defaultBrowser,
@@ -99,15 +114,8 @@ export function webext(options: WebExtOptions): Plugin {
   let distRootDir = browserOutDir
   let isBuild = false
 
-  function transformWithNativeMagicString(
-    this: TransformContextLike,
-    code: string,
-    id: string,
-    nativeMagicString: MagicStringLike,
-  ) {
-    const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null
-    const helperNamespace =
-      currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : 'browser'
+  function runTransformPipeline(pipeline: TransformPipelineContext): TransformPipelineResult | null {
+    const { ctx, code, id, parse, magic, apiNamespace } = pipeline
     let transformedCodeForChecks = code
     let i18nRewriteCount = 0
     let messagingRewriteCount = 0
@@ -116,16 +124,14 @@ export function webext(options: WebExtOptions): Plugin {
     if (resolvedI18nOptions.enabled) {
       const i18nRewritten = rewriteI18nTCalls(
         code,
-        (source) => this.parse(source),
+        parse,
         localeMessageIds,
-        {
-          apiNamespace: helperNamespace,
-          magicString: nativeMagicString,
-          returnMagicString: true,
-        },
+        magic
+          ? { apiNamespace, magicString: magic, returnMagicString: true }
+          : { apiNamespace },
       )
       if (i18nRewritten.unknownIds.length > 0) {
-        this.error(
+        ctx.error(
           `[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(', ')}\n` +
             `  → ${id}\n` +
             '  Define ids in src/locale/[localeName].ts using defineLocale({...}).',
@@ -133,22 +139,22 @@ export function webext(options: WebExtOptions): Plugin {
       }
       if (i18nRewritten.count > 0) {
         i18nRewriteCount = i18nRewritten.count
-        transformedCodeForChecks = nativeMagicString.toString()
-        this.warn(
-          `[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${helperNamespace}.i18n.getMessage(...)" in ${id}.`,
+        transformedCodeForChecks = magic ? magic.toString() : i18nRewritten.code.toString()
+        ctx.warn(
+          `[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${apiNamespace}.i18n.getMessage(...)" in ${id}.`,
         )
       }
     }
 
-    const messagingRewritten = rewriteMessagingCalls(code, (source) => this.parse(source), {
-      apiNamespace: helperNamespace,
-      magicString: nativeMagicString,
-      returnMagicString: true,
-    })
+    const messagingRewritten = rewriteMessagingCalls(
+      magic ? code : transformedCodeForChecks,
+      parse,
+      magic ? { apiNamespace, magicString: magic, returnMagicString: true } : { apiNamespace },
+    )
     if (messagingRewritten.count > 0) {
       messagingRewriteCount = messagingRewritten.count
-      transformedCodeForChecks = nativeMagicString.toString()
-      this.warn(
+      transformedCodeForChecks = magic ? magic.toString() : messagingRewritten.code.toString()
+      ctx.warn(
         `[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`,
       )
     }
@@ -156,45 +162,64 @@ export function webext(options: WebExtOptions): Plugin {
     const hasNamespaceAccess = hasApiNamespaceAccess(transformedCodeForChecks)
     if (!hasNamespaceAccess) {
       if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
-      return { code: nativeMagicString as unknown as string, map: null }
+      if (magic) return { code: magic as unknown as string, map: null }
+      return {
+        code: transformedCodeForChecks,
+        map: i18nRewriteCount > 0 ? null : messagingRewritten.map,
+      }
     }
 
-    const resolvedBrowser = requireBrowser(activeBrowser)
+    const currentBrowser = requireBrowser(activeBrowser)
     const unavailableApis =
-      resolvedBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
+      currentBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
 
     for (const api of unavailableApis) {
       if (!hasUnavailableApiAccess(transformedCodeForChecks, api)) continue
 
       const message =
-        `[vite-plugin-webext] API "${api}" is not available in ${resolvedBrowser}.\n` +
+        `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n` +
         `  → ${id}`
       if (unavailableApi === 'error') {
-        this.error(message)
+        ctx.error(message)
       } else if (unavailableApi === 'warn') {
-        this.warn(message)
+        ctx.warn(message)
       }
     }
 
     if (shouldTransformNamespaces) {
-      const targetNamespace = resolveApiNamespace(resolvedBrowser)
-      const rewritten = rewriteApiNamespaces(code, (source) => this.parse(source), targetNamespace, {
-        magicString: nativeMagicString,
-        returnMagicString: true,
-      })
+      const targetNamespace = resolveApiNamespace(currentBrowser)
+      const rewritten = rewriteApiNamespaces(
+        magic ? code : transformedCodeForChecks,
+        parse,
+        targetNamespace,
+        magic ? { magicString: magic, returnMagicString: true } : {},
+      )
       namespaceRewriteCount = rewritten.count
       if (namespaceRewriteCount > 0) {
-        this.warn(
+        ctx.warn(
           `[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
         )
       }
+      if (magic) {
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null
+        return { code: magic as unknown as string, map: null }
+      }
+      if (rewritten.count === 0) {
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
+        return { code: transformedCodeForChecks, map: null }
+      }
+      return {
+        code: rewritten.code.toString(),
+        map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map,
+      }
     }
 
-    if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) {
-      return null
+    if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
+    if (magic) return { code: magic as unknown as string, map: null }
+    return {
+      code: transformedCodeForChecks,
+      map: i18nRewriteCount > 0 ? null : messagingRewritten.map,
     }
-
-    return { code: nativeMagicString as unknown as string, map: null }
   }
 
   return {
@@ -263,104 +288,25 @@ export function webext(options: WebExtOptions): Plugin {
     transform(code, id, meta) {
       if (id.includes('node_modules')) return null
 
+      const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null
+      const apiNamespace =
+        currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : 'browser'
+
       const nativeMagicString = getNativeMagicString(meta)
+      const result = runTransformPipeline({
+        ctx: this,
+        code,
+        id,
+        parse: (source) => this.parse(source),
+        magic: nativeMagicString ?? undefined,
+        apiNamespace,
+      })
+
+      if (!result) return null
       if (nativeMagicString) {
-        return transformWithNativeMagicString.call(this, code, id, nativeMagicString)
+        return { code: nativeMagicString as unknown as string, map: result.map }
       }
-
-      let transformedCode = code
-      let transformedMap: ReturnType<typeof rewriteI18nTCalls>['map'] = null
-      let i18nRewriteCount = 0
-      let messagingRewriteCount = 0
-
-      if (resolvedI18nOptions.enabled) {
-        const i18nRewritten = rewriteI18nTCalls(
-          transformedCode,
-          (source) => this.parse(source),
-          localeMessageIds,
-        )
-        if (i18nRewritten.unknownIds.length > 0) {
-          this.error(
-            `[vite-plugin-webext] Unknown i18n message id(s): ${i18nRewritten.unknownIds.join(', ')}\n` +
-              `  → ${id}\n` +
-              '  Define ids in src/locale/[localeName].ts using defineLocale({...}).',
-          )
-        }
-        if (i18nRewritten.count > 0) {
-          transformedCode = i18nRewritten.code.toString()
-          transformedMap = i18nRewritten.map
-          i18nRewriteCount = i18nRewritten.count
-          this.warn(
-            `[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "browser.i18n.getMessage(...)" in ${id}.`,
-          )
-        }
-      }
-
-      const messagingRewritten = rewriteMessagingCalls(transformedCode, (source) => this.parse(source))
-      if (messagingRewritten.count > 0) {
-        transformedCode = messagingRewritten.code.toString()
-        transformedMap = i18nRewriteCount > 0 ? null : messagingRewritten.map
-        messagingRewriteCount = messagingRewritten.count
-        this.warn(
-          `[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`,
-        )
-      }
-
-      if (!hasApiNamespaceAccess(transformedCode)) {
-        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
-        return {
-          code: transformedCode,
-          map: transformedMap,
-        }
-      }
-
-      const currentBrowser = requireBrowser(activeBrowser)
-      const unavailableApis =
-        currentBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
-
-      for (const api of unavailableApis) {
-        if (!hasUnavailableApiAccess(transformedCode, api)) continue
-
-        const message =
-          `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n` +
-          `  → ${id}`
-        if (unavailableApi === 'error') {
-          this.error(message)
-        } else if (unavailableApi === 'warn') {
-          this.warn(message)
-        }
-      }
-
-      if (!shouldTransformNamespaces) {
-        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
-        return {
-          code: transformedCode,
-          map: transformedMap,
-        }
-      }
-
-      const targetNamespace = resolveApiNamespace(currentBrowser)
-      const rewritten = rewriteApiNamespaces(
-        transformedCode,
-        (source) => this.parse(source),
-        targetNamespace,
-      )
-      if (rewritten.count === 0) {
-        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
-        return {
-          code: transformedCode,
-          map: transformedMap,
-        }
-      }
-
-      this.warn(
-        `[vite-plugin-webext] Rewrote ${rewritten.count} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
-      )
-
-      return {
-        code: rewritten.code.toString(),
-        map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map,
-      }
+      return { code: result.code as string, map: result.map }
     },
 
     async closeBundle() {
@@ -622,10 +568,6 @@ function normalizeSourcePath(filePath: string): string {
   return normalized.replace(/^\.\/+/, '').replace(/^\/+/, '')
 }
 
-function normalizePath(filePath: string): string {
-  return filePath.split(path.sep).join('/')
-}
-
 function sanitizeVersionForFileName(version: string): string {
   return version.replace(/[^A-Za-z0-9._-]/g, '_')
 }
@@ -714,19 +656,11 @@ async function writeZip(
 ) {
   const writer = new Uint8ArrayWriter()
   const zipWriter = new ZipWriter(writer)
-  let closed = false
-  try {
-    for (const entry of entries) {
-      await zipWriter.add(entry.name, new Uint8ArrayReader(entry.data))
-    }
-    const zipData = await zipWriter.close()
-    closed = true
-    await fs.writeFile(outputPath, Buffer.from(zipData))
-  } finally {
-    if (!closed) {
-      await zipWriter.close().catch(() => undefined)
-    }
+  for (const entry of entries) {
+    await zipWriter.add(entry.name, new Uint8ArrayReader(entry.data))
   }
+  const zipData = await zipWriter.close()
+  await fs.writeFile(outputPath, Buffer.from(zipData))
 }
 
 function shouldIncludeSourceEntry(relativePath: string): boolean {

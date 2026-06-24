@@ -5,6 +5,7 @@ import {
   type MagicStringMap,
   type MagicStringOptions,
 } from '../magic-string.ts'
+import { walkAst, type AstNode } from '../utils/ast.ts'
 
 type BrowserTarget = 'chrome' | 'firefox'
 
@@ -25,7 +26,6 @@ export const CHROME_ONLY_APIS = [
   'systemLog',
   'topSites',
   'ttsEngine',
-  'userScripts',
   'vpnProvider',
   'wallpaper',
   'webAuthenticationProxy',
@@ -43,18 +43,7 @@ export const FIREFOX_ONLY_APIS = [
   'pkcs11',
   'proxy',
   'telemetry',
-  'userScripts',
 ] as const
-
-interface AstNode {
-  type: string
-  start?: number
-  end?: number
-  computed?: boolean
-  object?: unknown
-  name?: string
-  [key: string]: unknown
-}
 
 export function hasApiNamespaceAccess(code: string): boolean {
   return /\b(?:browser|chrome)\s*(?:\.|\?\.)/.test(code)
@@ -104,24 +93,6 @@ export function rewriteApiNamespaces(
     count: number
     code: string | MagicStringLike
     map: MagicStringMap | null
-  }
-}
-
-function walkAst(node: unknown, visit: (node: AstNode) => void) {
-  if (!node || typeof node !== 'object') return
-
-  const astNode = node as AstNode
-  if (!astNode.type) return
-
-  visit(astNode)
-
-  for (const value of Object.values(astNode)) {
-    if (!value) continue
-    if (Array.isArray(value)) {
-      for (const item of value) walkAst(item, visit)
-      continue
-    }
-    walkAst(value, visit)
   }
 }
 

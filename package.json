@@ -1,6 +1,6 @@
 {
   "name": "@taisan11/vite-plugin-webext",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Vite plugin for cross-browser web extension builds",
   "module": "./dist/index.mjs",
   "main": "./dist/index.mjs",
@@ -35,13 +35,15 @@
   "scripts": {
     "build": "tsdown --dts",
     "build:watch": "tsdown --dts --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "@types/chrome": "^0.2.0",
     "tsdown": "^0.22.3",
-    "vite": "^8.1.0"
+    "vite": "^8.1.0",
+    "vitest": "^4.1.9"
   },
   "peerDependencies": {
     "typescript": "^6.0.3"

@@ -6,6 +6,7 @@ import {
   type MagicStringOptions,
 } from '../magic-string.ts'
 import type { ApiNamespace } from '../browser/api-transform.ts'
+import { walkAst, type AstNode } from '../utils/ast.ts'
 
 const MESSAGING_IMPORT_SOURCES = new Set([
   '@taisan11/vite-plugin-webext/messaging',
@@ -13,23 +14,6 @@ const MESSAGING_IMPORT_SOURCES = new Set([
 ])
 
 type MessagingOperation = 'runtime' | 'tabs'
-
-interface AstNode {
-  type: string
-  start?: number
-  end?: number
-  source?: AstNode
-  value?: unknown
-  local?: AstNode
-  imported?: AstNode
-  name?: string
-  arguments?: unknown
-  callee?: unknown
-  object?: unknown
-  property?: unknown
-  computed?: boolean
-  [key: string]: unknown
-}
 
 interface RewriteMessagingResult {
   count: number
@@ -206,23 +190,4 @@ function renderMessagingReplacement(
 function sliceNode(code: string, node: AstNode): string {
   if (typeof node.start !== 'number' || typeof node.end !== 'number') return ''
   return code.slice(node.start, node.end)
-}
-
-function walkAst(node: unknown, visit: (node: AstNode) => void) {
-  if (!node || typeof node !== 'object') return
-  const astNode = node as AstNode
-  if (!astNode.type) return
-
-  visit(astNode)
-
-  for (const value of Object.values(astNode)) {
-    if (!value) continue
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        walkAst(item, visit)
-      }
-      continue
-    }
-    walkAst(value, visit)
-  }
 }
