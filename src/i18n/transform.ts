@@ -69,7 +69,7 @@ export function resolveI18nOptions(i18n?: boolean | I18nOptions): ResolvedI18nOp
 export async function prepareI18nArtifacts(
   rootDir: string,
   options: ResolvedI18nOptions,
-): Promise<{ messageIds: Set<string> }> {
+): Promise<{ messageIds: Set<string>; localeEntries: LocaleEntryData[] }> {
   const localeDir = path.resolve(rootDir, options.localeDir)
   const localeFiles = await readLocaleFiles(localeDir)
   if (localeFiles.length === 0) {
@@ -80,10 +80,16 @@ export async function prepareI18nArtifacts(
   }
 
   const messageIds = new Set<string>()
+  const localeEntries: LocaleEntryData[] = []
   for (const filePath of localeFiles) {
     const source = await fs.readFile(filePath, 'utf8')
     for (const id of extractDefineLocaleMessageIds(source)) {
       messageIds.add(id)
+    }
+    const localeCode = extractLocaleCodeFromFilePath(filePath)
+    const entry = extractDefineLocaleEntries(source, localeCode)
+    if (entry) {
+      localeEntries.push(entry)
     }
   }
 
@@ -91,7 +97,7 @@ export async function prepareI18nArtifacts(
   await fs.mkdir(path.dirname(generatedDtsPath), { recursive: true })
   await fs.writeFile(generatedDtsPath, renderLocaleMessageIdDts(messageIds))
 
-  return { messageIds }
+  return { messageIds, localeEntries }
 }
 
 export function rewriteI18nTCalls(
@@ -244,6 +250,13 @@ function renderLocaleMessageIdDts(messageIds: Set<string>): string {
   )
 }
 
+function extractLocaleCodeFromFilePath(filePath: string): string {
+  const basename = path.basename(filePath)
+  const ext = path.extname(basename)
+  const nameWithoutExt = basename.slice(0, -ext.length)
+  return nameWithoutExt.replace(/-/g, '_')
+}
+
 async function readLocaleFiles(localeDir: string): Promise<string[]> {
   let entries: Array<{ name: string; isFile: () => boolean }>
   try {
@@ -305,12 +318,237 @@ function extractTopLevelObjectLiteralKeys(source: string): string[] {
   const keys: string[] = []
   const properties = splitTopLevelObjectProperties(source)
   for (const property of properties) {
-    const key = parseObjectPropertyKey(property)
-    if (key) {
-      keys.push(key)
+    const parsed = parseObjectPropertyKey(property)
+    if (parsed) {
+      keys.push(parsed.key)
     }
   }
   return keys
+}
+
+export interface LocaleEntryData {
+  locale: string
+  messages: Record<string, unknown>
+}
+
+function extractDefineLocaleEntries(source: string, localeCode: string): LocaleEntryData | null {
+  let searchIndex = 0
+  while (searchIndex < source.length) {
+    const defineLocaleIndex = source.indexOf('defineLocale', searchIndex)
+    if (defineLocaleIndex === -1) break
+
+    const parenIndex = source.indexOf('(', defineLocaleIndex)
+    if (parenIndex === -1) break
+    const objectStart = findNextNonSpaceIndex(source, parenIndex + 1)
+    if (objectStart === -1 || source[objectStart] !== '{') {
+      searchIndex = parenIndex + 1
+      continue
+    }
+
+    const objectEnd = findMatchingBrace(source, objectStart)
+    if (objectEnd === -1) {
+      searchIndex = objectStart + 1
+      continue
+    }
+
+    const objectText = source.slice(objectStart + 1, objectEnd)
+    const messages: Record<string, unknown> = {}
+    const properties = splitTopLevelObjectProperties(objectText)
+    for (const property of properties) {
+      const parsed = parseObjectPropertyKey(property)
+      if (parsed) {
+        messages[parsed.key] = parsePropertyValue(parsed.valueText)
+      }
+    }
+
+    return { locale: localeCode, messages }
+  }
+
+  return null
+}
+
+function parsePropertyValue(valueText: string): unknown {
+  const trimmed = valueText.trim()
+  if (!trimmed) return ''
+
+  if (trimmed[0] === '{') {
+    const end = findMatchingBrace(trimmed, 0)
+    if (end === trimmed.length - 1) {
+      return parseNestedObject(trimmed.slice(1, end))
+    }
+  }
+
+  if (trimmed[0] === '[') {
+    const end = findMatchingBracket(trimmed, 0)
+    if (end === trimmed.length - 1) {
+      return parseNestedArray(trimmed.slice(1, end))
+    }
+  }
+
+  if ((trimmed[0] === '"' || trimmed[0] === "'" || trimmed[0] === '`') && trimmed.length >= 2) {
+    const quote = trimmed[0]
+    if (trimmed[trimmed.length - 1] === quote) {
+      return unescapeQuotedKey(trimmed.slice(1, -1))
+    }
+  }
+
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    return Number(trimmed)
+  }
+
+  if (trimmed === 'true') return true
+  if (trimmed === 'false') return false
+  if (trimmed === 'null') return null
+  if (trimmed === 'undefined') return undefined
+
+  return trimmed
+}
+
+function parseNestedObject(source: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  const properties = splitTopLevelObjectProperties(source)
+  for (const property of properties) {
+    const parsed = parseObjectPropertyKey(property)
+    if (parsed) {
+      result[parsed.key] = parsePropertyValue(parsed.valueText)
+    }
+  }
+  return result
+}
+
+function parseNestedArray(source: string): unknown[] {
+  const items: unknown[] = []
+  const trimmed = source.trim()
+  if (!trimmed) return items
+
+  let depth = 0
+  let inString: '"' | "'" | '`' | null = null
+  let escaped = false
+  let start = 0
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const char = trimmed[i]
+
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === inString) {
+        inString = null
+      }
+      continue
+    }
+
+    if (char === '"' || char === "'" || char === '`') {
+      inString = char
+      continue
+    }
+
+    if (char === '{' || char === '[' || char === '(') {
+      depth++
+      continue
+    }
+    if (char === '}' || char === ']' || char === ')') {
+      depth--
+      continue
+    }
+
+    if (depth === 0 && char === ',') {
+      const item = trimmed.slice(start, i).trim()
+      if (item) items.push(parsePropertyValue(item))
+      start = i + 1
+    }
+  }
+
+  const lastItem = trimmed.slice(start).trim()
+  if (lastItem) items.push(parsePropertyValue(lastItem))
+
+  return items
+}
+
+function findMatchingBracket(source: string, openIndex: number): number {
+  let depth = 0
+  let inString: '"' | "'" | '`' | null = null
+  let escaped = false
+  let inLineComment = false
+  let inBlockComment = false
+
+  for (let i = openIndex; i < source.length; i++) {
+    const char = source[i]
+    const next = source[i + 1]
+
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false
+      continue
+    }
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false
+        i++
+      }
+      continue
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === inString) {
+        inString = null
+      }
+      continue
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true
+      i++
+      continue
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true
+      i++
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      inString = char
+      continue
+    }
+
+    if (char === '[') depth++
+    if (char === ']') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+
+  return -1
+}
+
+export function transformLocaleEntriesToMessagesJson(
+  entries: LocaleEntryData[],
+): Record<string, Record<string, unknown>> {
+  const result: Record<string, Record<string, unknown>> = {}
+  for (const entry of entries) {
+    const messages: Record<string, unknown> = {}
+    for (const [id, value] of Object.entries(entry.messages)) {
+      if (typeof value === 'string') {
+        messages[id] = { message: value }
+      } else if (value && typeof value === 'object') {
+        messages[id] = value
+      }
+    }
+    result[entry.locale] = messages
+  }
+  return result
 }
 
 function splitTopLevelObjectProperties(source: string): string[] {
@@ -407,27 +645,31 @@ function splitTopLevelObjectProperties(source: string): string[] {
   return properties
 }
 
-function parseObjectPropertyKey(property: string): string | null {
+function parseObjectPropertyKey(property: string): { key: string; valueText: string } | null {
   if (property.startsWith('...')) return null
-  const colonIndex = findTopLevelColonIndex(property)
+  const colonIndex = findLastTopLevelColonIndex(property)
   if (colonIndex === -1) return null
 
   const rawKey = property.slice(0, colonIndex).trim()
   if (!rawKey || rawKey.startsWith('[')) return null
 
-  if (/^[A-Za-z_$][\w$]*$/.test(rawKey)) return rawKey
-  if (/^\d+$/.test(rawKey)) return rawKey
-
-  if (rawKey.length >= 2) {
+  let key: string | null = null
+  if (/^[A-Za-z_$][\w$]*$/.test(rawKey)) key = rawKey
+  else if (/^\d+$/.test(rawKey)) key = rawKey
+  else if (rawKey.length >= 2) {
     const quote = rawKey[0]
     const endQuote = rawKey[rawKey.length - 1]
     if ((quote === '"' || quote === "'" || quote === '`') && endQuote === quote) {
-      const body = rawKey.slice(1, -1)
-      return unescapeQuotedKey(body)
+      key = unescapeQuotedKey(rawKey.slice(1, -1))
     }
   }
 
-  return null
+  if (!key) return null
+
+  let valueText = property.slice(colonIndex + 1).trim()
+  if (valueText.endsWith(',')) valueText = valueText.slice(0, -1).trim()
+
+  return { key, valueText }
 }
 
 function findTopLevelColonIndex(source: string): number {
@@ -515,6 +757,94 @@ function findTopLevelColonIndex(source: string): number {
   }
 
   return -1
+}
+
+function findLastTopLevelColonIndex(source: string): number {
+  let lastIndex = -1
+  let inString: '"' | "'" | '`' | null = null
+  let escaped = false
+  let inLineComment = false
+  let inBlockComment = false
+  let braceDepth = 0
+  let bracketDepth = 0
+  let parenDepth = 0
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]
+    const next = source[i + 1]
+
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false
+      continue
+    }
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false
+        i++
+      }
+      continue
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === inString) {
+        inString = null
+      }
+      continue
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true
+      i++
+      continue
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true
+      i++
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      inString = char
+      continue
+    }
+
+    if (char === '{') {
+      braceDepth++
+      continue
+    }
+    if (char === '}') {
+      braceDepth--
+      continue
+    }
+    if (char === '[') {
+      bracketDepth++
+      continue
+    }
+    if (char === ']') {
+      bracketDepth--
+      continue
+    }
+    if (char === '(') {
+      parenDepth++
+      continue
+    }
+    if (char === ')') {
+      parenDepth--
+      continue
+    }
+
+    if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0 && char === ':') {
+      lastIndex = i
+    }
+  }
+
+  return lastIndex
 }
 
 function unescapeQuotedKey(value: string): string {

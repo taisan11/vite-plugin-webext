@@ -15,7 +15,9 @@ import {
   prepareI18nArtifacts,
   resolveI18nOptions,
   rewriteI18nTCalls,
+  transformLocaleEntriesToMessagesJson,
   type I18nOptions,
+  type LocaleEntryData,
 } from './i18n/transform.ts'
 import type { MagicStringLike } from './magic-string.ts'
 import { rewriteMessagingCalls } from './messaging/transform.ts'
@@ -109,6 +111,7 @@ export function webext(options: WebExtOptions): Plugin {
   let activeBrowser: BrowserTarget | null = null
   let resolvedManifest: WebExtensionManifest | null = null
   let localeMessageIds = new Set<string>()
+  let localeEntries: LocaleEntryData[] = []
   let rootDir = process.cwd()
   let browserOutDir = path.resolve(rootDir, 'dist')
   let distRootDir = browserOutDir
@@ -252,6 +255,7 @@ export function webext(options: WebExtOptions): Plugin {
       if (resolvedI18nOptions.enabled) {
         const prepared = await prepareI18nArtifacts(rootDir, resolvedI18nOptions)
         localeMessageIds = prepared.messageIds
+        localeEntries = prepared.localeEntries
       }
     },
 
@@ -281,6 +285,17 @@ export function webext(options: WebExtOptions): Plugin {
           fileName: 'manifest.json',
           source: `${JSON.stringify(manifestWithResolvedPaths, null, 2)}\n`,
         })
+
+        if (resolvedI18nOptions.enabled && localeEntries.length > 0) {
+          const messagesByLocale = transformLocaleEntriesToMessagesJson(localeEntries)
+          for (const [locale, messages] of Object.entries(messagesByLocale)) {
+            this.emitFile({
+              type: 'asset',
+              fileName: `_locales/${locale}/messages.json`,
+              source: `${JSON.stringify(messages, null, 2)}\n`,
+            })
+          }
+        }
       },
     },
 

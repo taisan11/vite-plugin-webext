@@ -5,19 +5,19 @@
     "": {
       "name": "vite-plugin-webext",
       "dependencies": {
-        "@types/firefox-webext-browser": "^143.0.0",
-        "@zip.js/zip.js": "^2.8.26",
-        "magic-string": "^0.30.21",
+        "@types/firefox-webext-browser": "latest",
+        "@zip.js/zip.js": "latest",
+        "magic-string": "latest",
       },
       "devDependencies": {
-        "@types/bun": "^1.3.14",
-        "@types/chrome": "^0.2.0",
-        "tsdown": "^0.22.3",
-        "vite": "^8.1.0",
-        "vitest": "^4.1.9",
+        "@types/bun": "latest",
+        "@types/chrome": "latest",
+        "tsdown": "latest",
+        "vite": "latest",
+        "vitest": "latest",
       },
       "peerDependencies": {
-        "typescript": "^6.0.3",
+        "typescript": "latest",
       },
     },
   },
