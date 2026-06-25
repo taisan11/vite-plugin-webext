@@ -145,14 +145,20 @@ async function prepareI18nArtifacts(rootDir, options) {
 	const localeFiles = await readLocaleFiles(path.resolve(rootDir, options.localeDir));
 	if (localeFiles.length === 0) throw new Error(`[vite-plugin-webext] i18n is enabled, but no locale source files were found in "${options.localeDir}". Create src/locale/[localeName].ts and export defineLocale({...}).`);
 	const messageIds = /* @__PURE__ */ new Set();
+	const localeEntries = [];
 	for (const filePath of localeFiles) {
 		const source = await promises.readFile(filePath, "utf8");
 		for (const id of extractDefineLocaleMessageIds(source)) messageIds.add(id);
+		const entry = extractDefineLocaleEntries(source, extractLocaleCodeFromFilePath(filePath));
+		if (entry) localeEntries.push(entry);
 	}
 	const generatedDtsPath = path.resolve(rootDir, options.generatedDtsPath);
 	await promises.mkdir(path.dirname(generatedDtsPath), { recursive: true });
 	await promises.writeFile(generatedDtsPath, renderLocaleMessageIdDts(messageIds));
-	return { messageIds };
+	return {
+		messageIds,
+		localeEntries
+	};
 }
 function rewriteI18nTCalls(code, parse, messageIds, options = {}) {
 	if (!hasI18nImport(code)) return {
@@ -255,6 +261,11 @@ ${lines.join("\n")}${lines.length > 0 ? "\n" : ""}  }
 export {}
 `;
 }
+function extractLocaleCodeFromFilePath(filePath) {
+	const basename = path.basename(filePath);
+	const ext = path.extname(basename);
+	return basename.slice(0, -ext.length).replace(/-/g, "_");
+}
 async function readLocaleFiles(localeDir) {
 	let entries;
 	try {
@@ -305,10 +316,180 @@ function extractTopLevelObjectLiteralKeys(source) {
 	const keys = [];
 	const properties = splitTopLevelObjectProperties(source);
 	for (const property of properties) {
-		const key = parseObjectPropertyKey(property);
-		if (key) keys.push(key);
+		const parsed = parseObjectPropertyKey(property);
+		if (parsed) keys.push(parsed.key);
 	}
 	return keys;
+}
+function extractDefineLocaleEntries(source, localeCode) {
+	let searchIndex = 0;
+	while (searchIndex < source.length) {
+		const defineLocaleIndex = source.indexOf("defineLocale", searchIndex);
+		if (defineLocaleIndex === -1) break;
+		const parenIndex = source.indexOf("(", defineLocaleIndex);
+		if (parenIndex === -1) break;
+		const objectStart = findNextNonSpaceIndex(source, parenIndex + 1);
+		if (objectStart === -1 || source[objectStart] !== "{") {
+			searchIndex = parenIndex + 1;
+			continue;
+		}
+		const objectEnd = findMatchingBrace(source, objectStart);
+		if (objectEnd === -1) {
+			searchIndex = objectStart + 1;
+			continue;
+		}
+		const objectText = source.slice(objectStart + 1, objectEnd);
+		const messages = {};
+		const properties = splitTopLevelObjectProperties(objectText);
+		for (const property of properties) {
+			const parsed = parseObjectPropertyKey(property);
+			if (parsed) messages[parsed.key] = parsePropertyValue(parsed.valueText);
+		}
+		return {
+			locale: localeCode,
+			messages
+		};
+	}
+	return null;
+}
+function parsePropertyValue(valueText) {
+	const trimmed = valueText.trim();
+	if (!trimmed) return "";
+	if (trimmed[0] === "{") {
+		const end = findMatchingBrace(trimmed, 0);
+		if (end === trimmed.length - 1) return parseNestedObject(trimmed.slice(1, end));
+	}
+	if (trimmed[0] === "[") {
+		const end = findMatchingBracket(trimmed, 0);
+		if (end === trimmed.length - 1) return parseNestedArray(trimmed.slice(1, end));
+	}
+	if ((trimmed[0] === "\"" || trimmed[0] === "'" || trimmed[0] === "`") && trimmed.length >= 2) {
+		const quote = trimmed[0];
+		if (trimmed[trimmed.length - 1] === quote) return unescapeQuotedKey(trimmed.slice(1, -1));
+	}
+	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+	if (trimmed === "true") return true;
+	if (trimmed === "false") return false;
+	if (trimmed === "null") return null;
+	if (trimmed === "undefined") return void 0;
+	return trimmed;
+}
+function parseNestedObject(source) {
+	const result = {};
+	const properties = splitTopLevelObjectProperties(source);
+	for (const property of properties) {
+		const parsed = parseObjectPropertyKey(property);
+		if (parsed) result[parsed.key] = parsePropertyValue(parsed.valueText);
+	}
+	return result;
+}
+function parseNestedArray(source) {
+	const items = [];
+	const trimmed = source.trim();
+	if (!trimmed) return items;
+	let depth = 0;
+	let inString = null;
+	let escaped = false;
+	let start = 0;
+	for (let i = 0; i < trimmed.length; i++) {
+		const char = trimmed[i];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === inString) inString = null;
+			continue;
+		}
+		if (char === "\"" || char === "'" || char === "`") {
+			inString = char;
+			continue;
+		}
+		if (char === "{" || char === "[" || char === "(") {
+			depth++;
+			continue;
+		}
+		if (char === "}" || char === "]" || char === ")") {
+			depth--;
+			continue;
+		}
+		if (depth === 0 && char === ",") {
+			const item = trimmed.slice(start, i).trim();
+			if (item) items.push(parsePropertyValue(item));
+			start = i + 1;
+		}
+	}
+	const lastItem = trimmed.slice(start).trim();
+	if (lastItem) items.push(parsePropertyValue(lastItem));
+	return items;
+}
+function findMatchingBracket(source, openIndex) {
+	let depth = 0;
+	let inString = null;
+	let escaped = false;
+	let inLineComment = false;
+	let inBlockComment = false;
+	for (let i = openIndex; i < source.length; i++) {
+		const char = source[i];
+		const next = source[i + 1];
+		if (inLineComment) {
+			if (char === "\n") inLineComment = false;
+			continue;
+		}
+		if (inBlockComment) {
+			if (char === "*" && next === "/") {
+				inBlockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === inString) inString = null;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			inLineComment = true;
+			i++;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			inBlockComment = true;
+			i++;
+			continue;
+		}
+		if (char === "\"" || char === "'" || char === "`") {
+			inString = char;
+			continue;
+		}
+		if (char === "[") depth++;
+		if (char === "]") {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+function transformLocaleEntriesToMessagesJson(entries) {
+	const result = {};
+	for (const entry of entries) {
+		const messages = {};
+		for (const [id, value] of Object.entries(entry.messages)) if (typeof value === "string") messages[id] = { message: value };
+		else if (value && typeof value === "object") messages[id] = value;
+		result[entry.locale] = messages;
+	}
+	return result;
 }
 function splitTopLevelObjectProperties(source) {
 	const properties = [];
@@ -324,13 +505,17 @@ function splitTopLevelObjectProperties(source) {
 		const char = source[i];
 		const next = source[i + 1];
 		if (inLineComment) {
-			if (char === "\n") inLineComment = false;
+			if (char === "\n") {
+				inLineComment = false;
+				segmentStart = i + 1;
+			}
 			continue;
 		}
 		if (inBlockComment) {
 			if (char === "*" && next === "/") {
 				inBlockComment = false;
 				i++;
+				segmentStart = i + 1;
 			}
 			continue;
 		}
@@ -396,20 +581,28 @@ function splitTopLevelObjectProperties(source) {
 }
 function parseObjectPropertyKey(property) {
 	if (property.startsWith("...")) return null;
-	const colonIndex = findTopLevelColonIndex(property);
+	const colonIndex = findLastTopLevelColonIndex(property);
 	if (colonIndex === -1) return null;
 	const rawKey = property.slice(0, colonIndex).trim();
 	if (!rawKey || rawKey.startsWith("[")) return null;
-	if (/^[A-Za-z_$][\w$]*$/.test(rawKey)) return rawKey;
-	if (/^\d+$/.test(rawKey)) return rawKey;
-	if (rawKey.length >= 2) {
+	let key = null;
+	if (/^[A-Za-z_$][\w$]*$/.test(rawKey)) key = rawKey;
+	else if (/^\d+$/.test(rawKey)) key = rawKey;
+	else if (rawKey.length >= 2) {
 		const quote = rawKey[0];
 		const endQuote = rawKey[rawKey.length - 1];
-		if ((quote === "\"" || quote === "'" || quote === "`") && endQuote === quote) return unescapeQuotedKey(rawKey.slice(1, -1));
+		if ((quote === "\"" || quote === "'" || quote === "`") && endQuote === quote) key = unescapeQuotedKey(rawKey.slice(1, -1));
 	}
-	return null;
+	if (!key) return null;
+	let valueText = property.slice(colonIndex + 1).trim();
+	if (valueText.endsWith(",")) valueText = valueText.slice(0, -1).trim();
+	return {
+		key,
+		valueText
+	};
 }
-function findTopLevelColonIndex(source) {
+function findLastTopLevelColonIndex(source) {
+	let lastIndex = -1;
 	let inString = null;
 	let escaped = false;
 	let inLineComment = false;
@@ -481,9 +674,9 @@ function findTopLevelColonIndex(source) {
 			parenDepth--;
 			continue;
 		}
-		if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0 && char === ":") return i;
+		if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0 && char === ":") lastIndex = i;
 	}
-	return -1;
+	return lastIndex;
 }
 function unescapeQuotedKey(value) {
 	return value.replace(/\\(['"`\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "	");
@@ -672,6 +865,7 @@ function webext(options) {
 	let activeBrowser = null;
 	let resolvedManifest = null;
 	let localeMessageIds = /* @__PURE__ */ new Set();
+	let localeEntries = [];
 	let rootDir = process.cwd();
 	let browserOutDir = path.resolve(rootDir, "dist");
 	let distRootDir = browserOutDir;
@@ -783,7 +977,11 @@ function webext(options) {
 			resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null;
 			browserOutDir = path.resolve(rootDir, config.build.outDir);
 			distRootDir = path.resolve(browserOutDir, "..");
-			if (resolvedI18nOptions.enabled) localeMessageIds = (await prepareI18nArtifacts(rootDir, resolvedI18nOptions)).messageIds;
+			if (resolvedI18nOptions.enabled) {
+				const prepared = await prepareI18nArtifacts(rootDir, resolvedI18nOptions);
+				localeMessageIds = prepared.messageIds;
+				localeEntries = prepared.localeEntries;
+			}
 		},
 		generateBundle: {
 			order: "post",
@@ -799,6 +997,14 @@ function webext(options) {
 					fileName: "manifest.json",
 					source: `${JSON.stringify(manifestWithResolvedPaths, null, 2)}\n`
 				});
+				if (resolvedI18nOptions.enabled && localeEntries.length > 0) {
+					const messagesByLocale = transformLocaleEntriesToMessagesJson(localeEntries);
+					for (const [locale, messages] of Object.entries(messagesByLocale)) this.emitFile({
+						type: "asset",
+						fileName: `_locales/${locale}/messages.json`,
+						source: `${JSON.stringify(messages, null, 2)}\n`
+					});
+				}
 			}
 		},
 		transform(code, id, meta) {

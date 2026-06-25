@@ -17,7 +17,7 @@ declare global {
   interface WebextI18nMessageIdMap {}
 }
 type KnownLocaleMessageId = keyof WebextI18nMessageIdMap & string;
-type LocaleMessageId = [KnownLocaleMessageId] extends [never] ? string : KnownLocaleMessageId;
+type LocaleMessageId = KnownLocaleMessageId | string;
 declare function t(id: LocaleMessageId, substitutions?: string | string[]): string;
 //#endregion
 export { type LocaleDefinition, type LocaleEntry, type LocaleMessageDefinition, LocaleMessageId, type LocalePlaceholderDefinition, defineLocale, t };
