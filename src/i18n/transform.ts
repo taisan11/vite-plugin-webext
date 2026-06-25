@@ -283,7 +283,7 @@ async function readLocaleFiles(localeDir: string): Promise<string[]> {
   return results.sort((a, b) => a.localeCompare(b))
 }
 
-function extractDefineLocaleMessageIds(source: string): Set<string> {
+export function extractDefineLocaleMessageIds(source: string): Set<string> {
   const ids = new Set<string>()
   let searchIndex = 0
   while (searchIndex < source.length) {
@@ -567,13 +567,17 @@ function splitTopLevelObjectProperties(source: string): string[] {
     const next = source[i + 1]
 
     if (inLineComment) {
-      if (char === '\n') inLineComment = false
+      if (char === '\n') {
+        inLineComment = false
+        segmentStart = i + 1
+      }
       continue
     }
     if (inBlockComment) {
       if (char === '*' && next === '/') {
         inBlockComment = false
         i++
+        segmentStart = i + 1
       }
       continue
     }
