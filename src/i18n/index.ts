@@ -13,7 +13,7 @@ declare global {
 }
 
 type KnownLocaleMessageId = keyof WebextI18nMessageIdMap & string
-export type LocaleMessageId = [KnownLocaleMessageId] extends [never] ? string : KnownLocaleMessageId
+export type LocaleMessageId = KnownLocaleMessageId | string
 
 interface BrowserI18nNamespace {
   getMessage(messageName: string, substitutions?: string | string[]): string
