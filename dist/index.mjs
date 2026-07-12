@@ -112,7 +112,7 @@ function normalizePath(filePath) {
 //#region src/i18n/transform.ts
 const DEFAULT_LOCALE_DIR = "src/locale";
 const DEFAULT_DTS_NAME = "webext-i18n.d.ts";
-const LOCALE_SOURCE_EXTENSIONS = new Set([
+const LOCALE_SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
 	".ts",
 	".tsx",
 	".mts",
@@ -122,7 +122,7 @@ const LOCALE_SOURCE_EXTENSIONS = new Set([
 	".mjs",
 	".cjs"
 ]);
-const I18N_IMPORT_SOURCES = new Set(["@taisan11/vite-plugin-webext/i18n", "@taisan11/vite-plugin-webext/src/i18n"]);
+const I18N_IMPORT_SOURCES = /* @__PURE__ */ new Set(["@taisan11/vite-plugin-webext/i18n", "@taisan11/vite-plugin-webext/src/i18n"]);
 function resolveI18nOptions(i18n) {
 	if (i18n === false || i18n == null) return {
 		enabled: false,
@@ -745,7 +745,7 @@ function findMatchingBrace(source, openIndex) {
 }
 //#endregion
 //#region src/messaging/transform.ts
-const MESSAGING_IMPORT_SOURCES = new Set(["@taisan11/vite-plugin-webext/messaging", "@taisan11/vite-plugin-webext/src/messaging"]);
+const MESSAGING_IMPORT_SOURCES = /* @__PURE__ */ new Set(["@taisan11/vite-plugin-webext/messaging", "@taisan11/vite-plugin-webext/src/messaging"]);
 function rewriteMessagingCalls(code, parse, options = {}) {
 	if (!hasMessagingImport(code)) return {
 		count: 0,

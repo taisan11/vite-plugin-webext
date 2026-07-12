@@ -1,6 +1,5 @@
 import MagicString from "magic-string";
 import { Plugin } from "vite";
-
 //#region src/i18n/transform.d.ts
 interface I18nOptions {
   enabled?: boolean;
