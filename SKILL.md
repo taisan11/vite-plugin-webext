@@ -52,21 +52,38 @@ If `--mode` is not `chrome` or `firefox`, set `defaultBrowser`. The legacy `brow
 
 ## Multi-Entry Extensions
 
-For popup, options, background, content scripts, or other entry points, configure Vite/Rolldown input paths.
+The plugin automatically derives bundle entry inputs from the `manifest` you pass. HTML pages (popup, options, devtools, side panel, sidebar, URL overrides, sandbox) and background scripts/service workers are collected from the manifest, so you normally do not need to configure `build.rolldownOptions.input` yourself.
 
 ```ts
-import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 import { webext } from '@taisan11/vite-plugin-webext'
 
 export default defineConfig({
-  plugins: [webext({ defaultBrowser: 'chrome', manifest: { manifest_version: 3, name: 'My Extension', version: '1.0.0' } })],
+  plugins: [
+    webext({
+      defaultBrowser: 'chrome',
+      manifest: {
+        manifest_version: 3,
+        name: 'My Extension',
+        version: '1.0.0',
+        background: { service_worker: 'src/background.ts', type: 'module' },
+        action: { default_popup: 'src/popup/index.html' },
+        options_ui: { page: 'src/options/index.html' },
+      },
+    }),
+  ],
+})
+```
+
+If a project needs extra inputs not present in the manifest, pass them via `build.rolldownOptions.input`; the plugin merges user inputs on top of the auto-derived ones (user keys win).
+
+```ts
+export default defineConfig({
+  plugins: [webext({ manifest })],
   build: {
     rolldownOptions: {
       input: {
-        background: resolve(__dirname, 'src/background.ts'),
-        popup: resolve(__dirname, 'src/popup/index.html'),
-        options: resolve(__dirname, 'src/options/index.html'),
+        content: resolve(__dirname, 'src/content/index.html'),
       },
     },
   },

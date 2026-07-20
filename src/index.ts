@@ -22,6 +22,7 @@ import {
 import type { MagicStringLike } from './magic-string.ts'
 import { rewriteMessagingCalls } from './messaging/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
+import { collectManifestInputs } from './utils/manifest-inputs.ts'
 import { normalizePath } from './utils/path.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
@@ -234,6 +235,11 @@ export function webext(options: WebExtOptions): Plugin {
       resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
       const outDir = withBrowserSubDir(userConfig.build?.outDir ?? 'dist', activeBrowser)
 
+      const currentRootDir = userConfig.root ? path.resolve(userConfig.root) : process.cwd()
+      const autoInputs = resolvedManifest
+        ? collectManifestInputs(resolvedManifest, currentRootDir)
+        : {}
+
       return {
         define: {
           'import.meta.env.BROWSER': JSON.stringify(activeBrowser),
@@ -242,6 +248,9 @@ export function webext(options: WebExtOptions): Plugin {
         },
         build: {
           outDir,
+          rolldownOptions: {
+            input: autoInputs,
+          },
         },
       }
     },
@@ -252,6 +261,18 @@ export function webext(options: WebExtOptions): Plugin {
       resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
       browserOutDir = path.resolve(rootDir, config.build.outDir)
       distRootDir = path.resolve(browserOutDir, '..')
+
+      if (resolvedManifest) {
+        const autoInputs = collectManifestInputs(resolvedManifest, rootDir)
+        const userInputs =
+          (config.build.rolldownOptions as { input?: Record<string, string> } | undefined)?.input ?? {}
+        const mergedInputs = { ...autoInputs, ...userInputs }
+        config.build.rolldownOptions = {
+          ...config.build.rolldownOptions,
+          input: mergedInputs,
+        }
+      }
+
       if (resolvedI18nOptions.enabled) {
         const prepared = await prepareI18nArtifacts(rootDir, resolvedI18nOptions)
         localeMessageIds = prepared.messageIds

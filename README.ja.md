@@ -76,7 +76,29 @@ export default defineConfig({
 
 ## `build.rolldownOptions.input` の設定例
 
-拡張機能で複数エントリを使う場合は `build.rolldownOptions.input` を指定します。
+プラグインは渡した `manifest` からバンドルのエントリ入力を自動収集します（background service worker/スクリプト、popup、options、devtools、side panel、sidebar、Chrome URL オーバーライド、sandbox ページ）。通常 `build.rolldownOptions.input` を手動で指定する必要はありません。
+
+```ts
+import { defineConfig } from 'vite'
+import { webext } from '@taisan11/vite-plugin-webext'
+
+export default defineConfig({
+  plugins: [
+    webext({
+      manifest: {
+        manifest_version: 3,
+        name: 'My Extension',
+        version: '1.0.0',
+        background: { service_worker: 'src/background.ts', type: 'module' },
+        action: { default_popup: 'src/popup/index.html' },
+        options_ui: { page: 'src/options/index.html' },
+      },
+    }),
+  ],
+})
+```
+
+manifest にない追加エントリが必要な場合は `build.rolldownOptions.input` で指定します。自動収集分の上にユーザー入力がマージされ、ユーザーキーが優先されます。
 
 ```ts
 import { defineConfig } from 'vite'
@@ -88,9 +110,7 @@ export default defineConfig({
   build: {
     rolldownOptions: {
       input: {
-        background: resolve(__dirname, 'src/background.ts'),
-        popup: resolve(__dirname, 'src/popup/index.html'),
-        options: resolve(__dirname, 'src/options/index.html'),
+        content: resolve(__dirname, 'src/content/index.html'),
       },
     },
   },

@@ -1,0 +1,13 @@
+{
+  "name": "vite-plugin-webext-example",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:chrome": "vite build --mode chrome",
+    "build:firefox": "vite build --mode firefox"
+  },
+  "devDependencies": {
+    "vite": "^8.1.5"
+  }
+}

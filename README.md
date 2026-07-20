@@ -78,7 +78,29 @@ export default defineConfig({
 
 ## `build.rolldownOptions.input` example
 
-For multi-entry extension builds, set input via `build.rolldownOptions.input`:
+The plugin automatically collects bundle entry inputs from the `manifest` you pass (background service worker/scripts, popup, options, devtools, side panel, sidebar, Chrome URL overrides, sandbox pages). You normally do not need to configure `build.rolldownOptions.input` manually:
+
+```ts
+import { defineConfig } from 'vite'
+import { webext } from '@taisan11/vite-plugin-webext'
+
+export default defineConfig({
+  plugins: [
+    webext({
+      manifest: {
+        manifest_version: 3,
+        name: 'My Extension',
+        version: '1.0.0',
+        background: { service_worker: 'src/background.ts', type: 'module' },
+        action: { default_popup: 'src/popup/index.html' },
+        options_ui: { page: 'src/options/index.html' },
+      },
+    }),
+  ],
+})
+```
+
+To add extra inputs not declared in the manifest, pass them via `build.rolldownOptions.input`. User-provided inputs are merged on top of the auto-derived ones (user keys win):
 
 ```ts
 import { defineConfig } from 'vite'
@@ -90,9 +112,7 @@ export default defineConfig({
   build: {
     rolldownOptions: {
       input: {
-        background: resolve(__dirname, 'src/background.ts'),
-        popup: resolve(__dirname, 'src/popup/index.html'),
-        options: resolve(__dirname, 'src/options/index.html'),
+        content: resolve(__dirname, 'src/content/index.html'),
       },
     },
   },
