@@ -1,3 +1,4 @@
+import { a as defineUnlistedScript, i as UnlistedScriptDefinition, n as InjectScriptResult, o as injectScript, r as InjectedScriptElement, t as InjectScriptOptions } from "./inject-script-CM_AZBhO.mjs";
 import MagicString from "magic-string";
 import { Plugin } from "vite";
 //#region src/i18n/transform.d.ts
@@ -500,6 +501,9 @@ interface WebExtensionManifest {
   [key: string]: unknown;
 }
 //#endregion
+//#region src/utils/unlisted-scripts.d.ts
+type UnlistedScripts = Record<string, string>;
+//#endregion
 //#region src/index.d.ts
 type BrowserTarget = 'chrome' | 'firefox';
 type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest;
@@ -521,15 +525,6 @@ interface WebExtOptions {
    */
   unavailableApi?: 'error' | 'warn' | 'ignore';
   /**
-   * Statically rewrite extension API namespaces to the target browser namespace.
-   * Default: true
-   */
-  staticTransform?: boolean;
-  /**
-   * Backward-compatible alias for `staticTransform`.
-   */
-  injectGlobals?: boolean;
-  /**
    * Manifest definition written to `manifest.json` during build.
    * You can pass a plain object or a factory function per browser target.
    */
@@ -547,8 +542,15 @@ interface WebExtOptions {
    * Default: disabled
    */
   i18n?: boolean | I18nOptions;
+  /**
+   * Scripts that are bundled as extension resources and can be injected from
+   * a content script with `injectScript(name)`.
+   */
+  unlistedScripts?: UnlistedScripts;
+  /** Convenience alias for configuring one or more unlisted scripts. */
+  unlistedScript?: string | UnlistedScripts;
 }
 declare function webext(options: WebExtOptions): Plugin;
 //#endregion
-export { BrowserTarget, ManifestFactory, WebExtOptions, webext };
+export { BrowserTarget, type InjectScriptOptions, type InjectScriptResult, type InjectedScriptElement, ManifestFactory, type UnlistedScriptDefinition, type UnlistedScripts, WebExtOptions, defineUnlistedScript, injectScript, webext };
 //# sourceMappingURL=index.d.mts.map

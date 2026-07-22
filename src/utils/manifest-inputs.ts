@@ -72,6 +72,13 @@ export function collectManifestInputs(
     manifest.sandbox.pages.forEach((page, index) => addHtml(`sandbox-${index}`, page))
   }
 
+  // Content scripts
+  manifest.content_scripts?.forEach((contentScript, contentScriptIndex) => {
+    contentScript.js?.forEach((script, scriptIndex) => {
+      addScript(`content-${contentScriptIndex}-${scriptIndex}`, script)
+    })
+  })
+
   return Object.fromEntries(entries)
 }
 

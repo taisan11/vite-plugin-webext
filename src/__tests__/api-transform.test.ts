@@ -2,8 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   hasApiNamespaceAccess,
   hasUnavailableApiAccess,
-  resolveApiNamespace,
-  rewriteApiNamespaces,
   CHROME_ONLY_APIS,
   FIREFOX_ONLY_APIS,
 } from '../browser/api-transform.ts'
@@ -35,25 +33,7 @@ describe('hasUnavailableApiAccess', () => {
   })
 })
 
-describe('resolveApiNamespace', () => {
-  it('should return chrome for chrome target', () => {
-    expect(resolveApiNamespace('chrome')).toBe('chrome')
-  })
-
-  it('should return browser for firefox target', () => {
-    expect(resolveApiNamespace('firefox')).toBe('browser')
-  })
-})
-
-describe('rewriteApiNamespaces', () => {
-  function parse(source: string): unknown {
-    // Simple mock parser that returns a minimal AST structure
-    return {
-      type: 'Program',
-      body: [],
-    }
-  }
-
+describe('API availability lists', () => {
   it('should have no overlapping APIs between chrome-only and firefox-only lists', () => {
     const chromeSet = new Set<string>(CHROME_ONLY_APIS)
     const firefoxSet = new Set<string>(FIREFOX_ONLY_APIS)

@@ -1,46 +1,8 @@
+import { n as injectScript, t as defineUnlistedScript } from "./inject-script-CvNLWJUM.mjs";
 import { promises } from "node:fs";
 import path from "node:path";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import MagicString from "magic-string";
-//#region src/magic-string.ts
-function createMagicString(code, options = {}) {
-	return options.magicString ?? new MagicString(code);
-}
-function finishMagicStringTransform(code, magic, count, options = {}) {
-	if (count === 0) return {
-		code,
-		map: null
-	};
-	if (options.returnMagicString) return {
-		code: magic,
-		map: null
-	};
-	return {
-		code: magic.toString(),
-		map: generateMap(magic)
-	};
-}
-function generateMap(magic) {
-	const map = magic.generateMap?.({ hires: true });
-	return map == null ? null : map;
-}
-//#endregion
-//#region src/utils/ast.ts
-function walkAst(node, visit) {
-	if (!node || typeof node !== "object") return;
-	const astNode = node;
-	if (!astNode.type) return;
-	visit(astNode);
-	for (const value of Object.values(astNode)) {
-		if (!value) continue;
-		if (Array.isArray(value)) {
-			for (const item of value) walkAst(item, visit);
-			continue;
-		}
-		walkAst(value, visit);
-	}
-}
-//#endregion
 //#region src/browser/api-transform.ts
 const CHROME_ONLY_APIS = [
 	"offscreen",
@@ -80,28 +42,47 @@ function hasApiNamespaceAccess(code) {
 function hasUnavailableApiAccess(code, api) {
 	return new RegExp(`(?:browser|chrome)\\??\\.${escapeRe(api)}\\b`).test(code);
 }
-function resolveApiNamespace(browser) {
-	return browser === "chrome" ? "chrome" : "browser";
-}
-function rewriteApiNamespaces(code, parse, targetNamespace, options = {}) {
-	const ast = parse(code);
-	const magic = createMagicString(code, options);
-	let count = 0;
-	walkAst(ast, (node) => {
-		if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression" || node.computed) return;
-		const object = node.object;
-		if (object?.type === "Identifier" && (object.name === "chrome" || object.name === "browser") && object.name !== targetNamespace && typeof object.start === "number" && typeof object.end === "number") {
-			magic.overwrite(object.start, object.end, targetNamespace);
-			count++;
-		}
-	});
-	return {
-		count,
-		...finishMagicStringTransform(code, magic, count, options)
-	};
-}
 function escapeRe(s) {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+//#endregion
+//#region src/magic-string.ts
+function createMagicString(code, options = {}) {
+	return options.magicString ?? new MagicString(code);
+}
+function finishMagicStringTransform(code, magic, count, options = {}) {
+	if (count === 0) return {
+		code,
+		map: null
+	};
+	if (options.returnMagicString) return {
+		code: magic,
+		map: null
+	};
+	return {
+		code: magic.toString(),
+		map: generateMap(magic)
+	};
+}
+function generateMap(magic) {
+	const map = magic.generateMap?.({ hires: true });
+	return map == null ? null : map;
+}
+//#endregion
+//#region src/utils/ast.ts
+function walkAst(node, visit) {
+	if (!node || typeof node !== "object") return;
+	const astNode = node;
+	if (!astNode.type) return;
+	visit(astNode);
+	for (const value of Object.values(astNode)) {
+		if (!value) continue;
+		if (Array.isArray(value)) {
+			for (const item of value) walkAst(item, visit);
+			continue;
+		}
+		walkAst(value, visit);
+	}
 }
 //#endregion
 //#region src/utils/path.ts
@@ -904,6 +885,11 @@ function collectManifestInputs(manifest, rootDir) {
 		if (overrides.history) addHtml("history", overrides.history);
 	}
 	if (manifest.sandbox?.pages) manifest.sandbox.pages.forEach((page, index) => addHtml(`sandbox-${index}`, page));
+	manifest.content_scripts?.forEach((contentScript, contentScriptIndex) => {
+		contentScript.js?.forEach((script, scriptIndex) => {
+			addScript(`content-${contentScriptIndex}-${scriptIndex}`, script);
+		});
+	});
 	return Object.fromEntries(entries);
 }
 function isHtmlPath(relativePath) {
@@ -914,12 +900,41 @@ function resolveInputPath(relativePath, rootDir) {
 	return path.resolve(rootDir, normalized);
 }
 //#endregion
+//#region src/utils/unlisted-scripts.ts
+function collectUnlistedScriptInputs(scripts, rootDir) {
+	return Object.fromEntries(Object.entries(scripts).map(([name, source]) => {
+		return [normalizeUnlistedScriptName(name), path.resolve(rootDir, normalizePath(source).replace(/^\.\//, ""))];
+	}));
+}
+function resolveUnlistedScriptManifest(manifest, names) {
+	if (names.length === 0) return manifest;
+	const resources = names.map((name) => `${normalizeUnlistedScriptName(name)}.js`);
+	const resolved = structuredClone(manifest);
+	const existing = resolved.web_accessible_resources;
+	if (resolved.manifest_version === 2 || Array.isArray(existing) && existing.every((entry) => typeof entry === "string")) {
+		resolved.web_accessible_resources = [...Array.isArray(existing) ? existing.filter((entry) => typeof entry === "string") : [], ...resources];
+		return resolved;
+	}
+	const matches = [...new Set((resolved.content_scripts ?? []).flatMap((contentScript) => contentScript.matches))];
+	const resourceEntry = {
+		resources,
+		matches: matches.length > 0 ? matches : ["<all_urls>"]
+	};
+	resolved.web_accessible_resources = [...Array.isArray(existing) ? existing.filter((entry) => typeof entry !== "string") : [], resourceEntry];
+	return resolved;
+}
+function normalizeUnlistedScriptName(name) {
+	const normalized = normalizePath(name.trim()).replace(/^\/+|\/+$/g, "");
+	if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("src/") || normalized.includes("../")) throw new Error(`[vite-plugin-webext] Invalid unlisted script name: "${name}".`);
+	return normalized.endsWith(".js") ? normalized.slice(0, -3) : normalized;
+}
+//#endregion
 //#region src/index.ts
 function webext(options) {
-	const { defaultBrowser, browser, unavailableApi = "error", staticTransform = true, injectGlobals, manifest, zipArtifacts = true, i18n } = options;
+	const { defaultBrowser, browser, unavailableApi = "error", manifest, zipArtifacts = true, i18n, unlistedScripts, unlistedScript } = options;
 	const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser);
-	const shouldTransformNamespaces = injectGlobals ?? staticTransform;
 	const resolvedI18nOptions = resolveI18nOptions(i18n);
+	const configuredUnlistedScripts = resolveUnlistedScripts(unlistedScripts, unlistedScript);
 	let activeBrowser = null;
 	let resolvedManifest = null;
 	let localeMessageIds = /* @__PURE__ */ new Set();
@@ -928,12 +943,12 @@ function webext(options) {
 	let browserOutDir = path.resolve(rootDir, "dist");
 	let distRootDir = browserOutDir;
 	let isBuild = false;
+	let isZipMode = false;
 	function runTransformPipeline(pipeline) {
 		const { ctx, code, id, parse, magic, apiNamespace } = pipeline;
 		let transformedCodeForChecks = code;
 		let i18nRewriteCount = 0;
 		let messagingRewriteCount = 0;
-		let namespaceRewriteCount = 0;
 		if (resolvedI18nOptions.enabled) {
 			const i18nRewritten = rewriteI18nTCalls(code, parse, localeMessageIds, magic ? {
 				apiNamespace,
@@ -976,33 +991,6 @@ function webext(options) {
 			if (unavailableApi === "error") ctx.error(message);
 			else if (unavailableApi === "warn") ctx.warn(message);
 		}
-		if (shouldTransformNamespaces) {
-			const targetNamespace = resolveApiNamespace(currentBrowser);
-			const rewritten = rewriteApiNamespaces(magic ? code : transformedCodeForChecks, parse, targetNamespace, magic ? {
-				magicString: magic,
-				returnMagicString: true
-			} : {});
-			namespaceRewriteCount = rewritten.count;
-			if (namespaceRewriteCount > 0) ctx.warn(`[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`);
-			if (magic) {
-				if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null;
-				return {
-					code: magic,
-					map: null
-				};
-			}
-			if (rewritten.count === 0) {
-				if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
-				return {
-					code: transformedCodeForChecks,
-					map: null
-				};
-			}
-			return {
-				code: rewritten.code.toString(),
-				map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map
-			};
-		}
 		if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null;
 		if (magic) return {
 			code: magic,
@@ -1017,11 +1005,13 @@ function webext(options) {
 		name: "vite-plugin-webext",
 		config(userConfig, configEnv) {
 			isBuild = configEnv.command === "build";
+			isZipMode = isBuild && isZipBuildMode(configEnv.mode);
 			activeBrowser = resolveBrowserTarget(configEnv.mode, configuredDefaultBrowser);
-			resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null;
+			resolvedManifest = manifest ? resolveUnlistedScriptManifest(resolveManifest(manifest, activeBrowser), Object.keys(configuredUnlistedScripts)) : null;
 			const outDir = withBrowserSubDir(userConfig.build?.outDir ?? "dist", activeBrowser);
 			const currentRootDir = userConfig.root ? path.resolve(userConfig.root) : process.cwd();
 			const autoInputs = resolvedManifest ? collectManifestInputs(resolvedManifest, currentRootDir) : {};
+			const unlistedInputs = collectUnlistedScriptInputs(configuredUnlistedScripts, currentRootDir);
 			return {
 				define: {
 					"import.meta.env.BROWSER": JSON.stringify(activeBrowser),
@@ -1030,18 +1020,22 @@ function webext(options) {
 				},
 				build: {
 					outDir,
-					rolldownOptions: { input: autoInputs }
+					rolldownOptions: { input: {
+						...autoInputs,
+						...unlistedInputs
+					} }
 				}
 			};
 		},
 		async configResolved(config) {
 			rootDir = config.root;
 			activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser);
-			resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null;
+			resolvedManifest = manifest ? resolveUnlistedScriptManifest(resolveManifest(manifest, activeBrowser), Object.keys(configuredUnlistedScripts)) : null;
 			browserOutDir = path.resolve(rootDir, config.build.outDir);
 			distRootDir = path.resolve(browserOutDir, "..");
 			if (resolvedManifest) {
 				const autoInputs = collectManifestInputs(resolvedManifest, rootDir);
+				const unlistedInputs = collectUnlistedScriptInputs(configuredUnlistedScripts, rootDir);
 				const userInputs = config.build.rolldownOptions?.input ?? {};
 				const mergedInputs = {
 					...autoInputs,
@@ -1049,7 +1043,10 @@ function webext(options) {
 				};
 				config.build.rolldownOptions = {
 					...config.build.rolldownOptions,
-					input: mergedInputs
+					input: {
+						...unlistedInputs,
+						...mergedInputs
+					}
 				};
 			}
 			if (resolvedI18nOptions.enabled) {
@@ -1084,8 +1081,7 @@ function webext(options) {
 		},
 		transform(code, id, meta) {
 			if (id.includes("node_modules")) return null;
-			const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null;
-			const apiNamespace = currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : "browser";
+			const apiNamespace = "browser";
 			const nativeMagicString = getNativeMagicString(meta);
 			const result = runTransformPipeline({
 				ctx: this,
@@ -1106,7 +1102,7 @@ function webext(options) {
 			};
 		},
 		async closeBundle() {
-			if (!isBuild || !zipArtifacts) return;
+			if (!isBuild || !zipArtifacts || !isZipMode) return;
 			const currentBrowser = requireBrowser(activeBrowser);
 			const versionResult = await resolveArtifactVersion(browserOutDir, resolvedManifest);
 			if (versionResult.source === "fallback") this.warn(`[vite-plugin-webext] Could not resolve manifest version for zip artifacts. Using fallback version "${versionResult.version}".`);
@@ -1130,6 +1126,15 @@ function resolveConfiguredDefaultBrowser(browser, defaultBrowser) {
 	if (!browser || browser === defaultBrowser) return defaultBrowser;
 	throw new Error("[vite-plugin-webext] `browser` and `defaultBrowser` are both set with different values. Use only one option, or set the same value for both.");
 }
+function resolveUnlistedScripts(scripts, script) {
+	const resolved = { ...scripts ?? {} };
+	if (typeof script === "string") resolved.main = script;
+	else if (script) Object.assign(resolved, script);
+	return resolved;
+}
+function isZipBuildMode(mode) {
+	return mode.endsWith("-zip") && parseBrowserMode(mode) !== null;
+}
 function resolveBrowserTarget(mode, configuredBrowser) {
 	const browserFromMode = parseBrowserMode(mode);
 	if (browserFromMode) return browserFromMode;
@@ -1137,7 +1142,8 @@ function resolveBrowserTarget(mode, configuredBrowser) {
 	throw new Error("[vite-plugin-webext] Could not resolve browser target. Use `vite build --mode chrome|firefox` or pass `webext({ defaultBrowser })` (or legacy `webext({ browser })`).");
 }
 function parseBrowserMode(mode) {
-	if (mode === "chrome" || mode === "firefox") return mode;
+	const browserMode = mode.endsWith("-zip") ? mode.slice(0, -4) : mode;
+	if (browserMode === "chrome" || browserMode === "firefox") return browserMode;
 	return null;
 }
 function requireBrowser(browser) {
@@ -1327,6 +1333,6 @@ function toPosixPath(filePath) {
 	return normalizePath(filePath);
 }
 //#endregion
-export { webext };
+export { defineUnlistedScript, injectScript, webext };
 
 //# sourceMappingURL=index.mjs.map

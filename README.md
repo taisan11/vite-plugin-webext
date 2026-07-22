@@ -17,7 +17,7 @@ It supports:
 - Browser target resolution from `--mode` (`chrome` / `firefox`)
 - Configurable default browser when `--mode` is not set
 - Manifest generation from `vite.config.ts`
-- Fully static namespace rewrite with MagicString (`chrome` output uses `chrome.*`, `firefox` output uses `browser.*`)
+- Extension API availability checks for browser-specific APIs
 - Type-safe messaging helpers with static replacement (`runtime.sendMessage` / `tabs.sendMessage`)
 - Browser-separated output directories
 - Zip artifact generation via `@zip.js/zip.js`
@@ -86,6 +86,44 @@ export default defineConfig({
 - `WebExtensionManifest`
 - `(browser) => WebExtensionManifest`
 
+## Injecting unlisted scripts
+
+Configure scripts that should be bundled as extension resources without adding them to `content_scripts`:
+
+```ts
+webext({
+  unlistedScripts: {
+    mainWorld: 'src/main-world.ts',
+  },
+  manifest: {
+    manifest_version: 3,
+    name: 'My Extension',
+    version: '1.0.0',
+    content_scripts: [{ matches: ['*://*/*'], js: ['src/content.ts'] }],
+  },
+})
+```
+
+From a content script, call `injectScript('mainWorld')` to inject the generated `mainWorld.js` into the page's main world:
+
+The unlisted script itself can use `defineUnlistedScript`:
+
+```ts
+import { defineUnlistedScript } from '@taisan11/vite-plugin-webext/inject-script'
+
+export default defineUnlistedScript(() => {
+  console.log('running in the page')
+})
+```
+
+```ts
+import { injectScript } from '@taisan11/vite-plugin-webext/inject-script'
+
+await injectScript('mainWorld')
+```
+
+The plugin automatically adds the configured scripts to `web_accessible_resources`.
+
 ## `build.rolldownOptions.input` example
 
 The plugin automatically collects bundle entry inputs from the `manifest` you pass (background service worker/scripts, popup, options, devtools, side panel, sidebar, Chrome URL overrides, sandbox pages). You normally do not need to configure `build.rolldownOptions.input` manually:
@@ -129,16 +167,11 @@ export default defineConfig({
 })
 ```
 
-## Static rewrite policy
+## Extension API namespaces
 
-Write extension code with `browser.*`.
-
-At build time, the plugin performs fully static namespace rewriting with MagicString:
-
-- `vite build --mode chrome` rewrites `browser.*`  to `chrome.*`
-- `vite build --mode firefox` not rewrites `browser.*` to `browser.*`
-
-No runtime shim is injected.
+The plugin leaves `browser.*` and `chrome.*` references unchanged. Choose the
+namespace your runtime and project setup provide; no namespace rewrite or
+runtime shim is injected.
 
 When running on Rolldown with `experimental.nativeMagicString: true`, the plugin automatically uses the native `meta.magicString` object when it is available and falls back to the JavaScript `magic-string` package otherwise.
 
@@ -229,7 +262,7 @@ Build output is placed under:
 
 ## Zip artifacts
 
-When building with mode, the plugin creates:
+When building with `--mode chrome-zip` or `--mode firefox-zip`, the plugin creates:
 
 - `dist/<browser>-<version>-source.zip`
 - `dist/<browser>-<version>-dist.zip`
@@ -241,6 +274,6 @@ Example for chrome mode:
 - `dist/chrome-1.2.3-dist.zip`
 - `dist/chrome-zip.zip`
 
-Set `zipArtifacts: false` to disable zip generation.
+Regular `--mode chrome` / `--mode firefox` builds do not generate zip files. Set `zipArtifacts: false` to disable zip generation even in a `-zip` mode.
 
 If the browser output directory is missing (for example, `build.write: false`), dist zip generation is skipped with a warning instead of failing the build.

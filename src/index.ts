@@ -7,9 +7,6 @@ import {
   FIREFOX_ONLY_APIS,
   hasApiNamespaceAccess,
   hasUnavailableApiAccess,
-  resolveApiNamespace,
-  rewriteApiNamespaces,
-  type ApiNamespace,
 } from './browser/api-transform.ts'
 import {
   prepareI18nArtifacts,
@@ -24,6 +21,11 @@ import { rewriteMessagingCalls } from './messaging/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
 import { collectManifestInputs } from './utils/manifest-inputs.ts'
 import { normalizePath } from './utils/path.ts'
+import {
+  collectUnlistedScriptInputs,
+  resolveUnlistedScriptManifest,
+  type UnlistedScripts,
+} from './utils/unlisted-scripts.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
 export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
@@ -46,15 +48,6 @@ export interface WebExtOptions {
    */
   unavailableApi?: 'error' | 'warn' | 'ignore'
   /**
-   * Statically rewrite extension API namespaces to the target browser namespace.
-   * Default: true
-   */
-  staticTransform?: boolean
-  /**
-   * Backward-compatible alias for `staticTransform`.
-   */
-  injectGlobals?: boolean
-  /**
    * Manifest definition written to `manifest.json` during build.
    * You can pass a plain object or a factory function per browser target.
    */
@@ -72,7 +65,23 @@ export interface WebExtOptions {
    * Default: disabled
    */
   i18n?: boolean | I18nOptions
+  /**
+   * Scripts that are bundled as extension resources and can be injected from
+   * a content script with `injectScript(name)`.
+   */
+  unlistedScripts?: UnlistedScripts
+  /** Convenience alias for configuring one or more unlisted scripts. */
+  unlistedScript?: string | UnlistedScripts
 }
+
+export { defineUnlistedScript, injectScript } from './inject-script.ts'
+export type {
+  InjectScriptOptions,
+  InjectScriptResult,
+  InjectedScriptElement,
+  UnlistedScriptDefinition,
+} from './inject-script.ts'
+export type { UnlistedScripts } from './utils/unlisted-scripts.ts'
 
 interface TransformContextLike {
   parse(source: string): unknown
@@ -86,7 +95,7 @@ interface TransformPipelineContext {
   id: string
   parse: (source: string) => unknown
   magic?: MagicStringLike
-  apiNamespace: ApiNamespace
+  apiNamespace: 'browser' | 'chrome'
 }
 
 interface TransformPipelineResult {
@@ -99,15 +108,15 @@ export function webext(options: WebExtOptions): Plugin {
     defaultBrowser,
     browser,
     unavailableApi = 'error',
-    staticTransform = true,
-    injectGlobals,
     manifest,
     zipArtifacts = true,
     i18n,
+    unlistedScripts,
+    unlistedScript,
   } = options
   const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser)
-  const shouldTransformNamespaces = injectGlobals ?? staticTransform
   const resolvedI18nOptions = resolveI18nOptions(i18n)
+  const configuredUnlistedScripts = resolveUnlistedScripts(unlistedScripts, unlistedScript)
 
   let activeBrowser: BrowserTarget | null = null
   let resolvedManifest: WebExtensionManifest | null = null
@@ -117,13 +126,13 @@ export function webext(options: WebExtOptions): Plugin {
   let browserOutDir = path.resolve(rootDir, 'dist')
   let distRootDir = browserOutDir
   let isBuild = false
+  let isZipMode = false
 
   function runTransformPipeline(pipeline: TransformPipelineContext): TransformPipelineResult | null {
     const { ctx, code, id, parse, magic, apiNamespace } = pipeline
     let transformedCodeForChecks = code
     let i18nRewriteCount = 0
     let messagingRewriteCount = 0
-    let namespaceRewriteCount = 0
 
     if (resolvedI18nOptions.enabled) {
       const i18nRewritten = rewriteI18nTCalls(
@@ -190,34 +199,6 @@ export function webext(options: WebExtOptions): Plugin {
       }
     }
 
-    if (shouldTransformNamespaces) {
-      const targetNamespace = resolveApiNamespace(currentBrowser)
-      const rewritten = rewriteApiNamespaces(
-        magic ? code : transformedCodeForChecks,
-        parse,
-        targetNamespace,
-        magic ? { magicString: magic, returnMagicString: true } : {},
-      )
-      namespaceRewriteCount = rewritten.count
-      if (namespaceRewriteCount > 0) {
-        ctx.warn(
-          `[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
-        )
-      }
-      if (magic) {
-        if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null
-        return { code: magic as unknown as string, map: null }
-      }
-      if (rewritten.count === 0) {
-        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
-        return { code: transformedCodeForChecks, map: null }
-      }
-      return {
-        code: rewritten.code.toString(),
-        map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map,
-      }
-    }
-
     if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
     if (magic) return { code: magic as unknown as string, map: null }
     return {
@@ -231,14 +212,21 @@ export function webext(options: WebExtOptions): Plugin {
 
     config(userConfig, configEnv): UserConfig {
       isBuild = configEnv.command === 'build'
+      isZipMode = isBuild && isZipBuildMode(configEnv.mode)
       activeBrowser = resolveBrowserTarget(configEnv.mode, configuredDefaultBrowser)
-      resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
+      resolvedManifest = manifest
+        ? resolveUnlistedScriptManifest(
+            resolveManifest(manifest, activeBrowser),
+            Object.keys(configuredUnlistedScripts),
+          )
+        : null
       const outDir = withBrowserSubDir(userConfig.build?.outDir ?? 'dist', activeBrowser)
 
       const currentRootDir = userConfig.root ? path.resolve(userConfig.root) : process.cwd()
       const autoInputs = resolvedManifest
         ? collectManifestInputs(resolvedManifest, currentRootDir)
         : {}
+      const unlistedInputs = collectUnlistedScriptInputs(configuredUnlistedScripts, currentRootDir)
 
       return {
         define: {
@@ -249,7 +237,7 @@ export function webext(options: WebExtOptions): Plugin {
         build: {
           outDir,
           rolldownOptions: {
-            input: autoInputs,
+            input: { ...autoInputs, ...unlistedInputs },
           },
         },
       }
@@ -258,18 +246,24 @@ export function webext(options: WebExtOptions): Plugin {
     async configResolved(config) {
       rootDir = config.root
       activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser)
-      resolvedManifest = manifest ? resolveManifest(manifest, activeBrowser) : null
+      resolvedManifest = manifest
+        ? resolveUnlistedScriptManifest(
+            resolveManifest(manifest, activeBrowser),
+            Object.keys(configuredUnlistedScripts),
+          )
+        : null
       browserOutDir = path.resolve(rootDir, config.build.outDir)
       distRootDir = path.resolve(browserOutDir, '..')
 
       if (resolvedManifest) {
         const autoInputs = collectManifestInputs(resolvedManifest, rootDir)
+        const unlistedInputs = collectUnlistedScriptInputs(configuredUnlistedScripts, rootDir)
         const userInputs =
           (config.build.rolldownOptions as { input?: Record<string, string> } | undefined)?.input ?? {}
         const mergedInputs = { ...autoInputs, ...userInputs }
         config.build.rolldownOptions = {
           ...config.build.rolldownOptions,
-          input: mergedInputs,
+          input: { ...unlistedInputs, ...mergedInputs },
         }
       }
 
@@ -323,9 +317,7 @@ export function webext(options: WebExtOptions): Plugin {
     transform(code, id, meta) {
       if (id.includes('node_modules')) return null
 
-      const currentBrowser = activeBrowser ? requireBrowser(activeBrowser) : null
-      const apiNamespace =
-        currentBrowser && shouldTransformNamespaces ? resolveApiNamespace(currentBrowser) : 'browser'
+      const apiNamespace = 'browser'
 
       const nativeMagicString = getNativeMagicString(meta)
       const result = runTransformPipeline({
@@ -345,7 +337,7 @@ export function webext(options: WebExtOptions): Plugin {
     },
 
     async closeBundle() {
-      if (!isBuild || !zipArtifacts) return
+      if (!isBuild || !zipArtifacts || !isZipMode) return
 
       const currentBrowser = requireBrowser(activeBrowser)
       const versionResult = await resolveArtifactVersion(browserOutDir, resolvedManifest)
@@ -409,6 +401,23 @@ function resolveConfiguredDefaultBrowser(
   )
 }
 
+function resolveUnlistedScripts(
+  scripts: UnlistedScripts | undefined,
+  script: string | UnlistedScripts | undefined,
+): UnlistedScripts {
+  const resolved = { ...(scripts ?? {}) }
+  if (typeof script === 'string') {
+    resolved.main = script
+  } else if (script) {
+    Object.assign(resolved, script)
+  }
+  return resolved
+}
+
+function isZipBuildMode(mode: string): boolean {
+  return mode.endsWith('-zip') && parseBrowserMode(mode) !== null
+}
+
 function resolveBrowserTarget(mode: string, configuredBrowser?: BrowserTarget): BrowserTarget {
   const browserFromMode = parseBrowserMode(mode)
   if (browserFromMode) return browserFromMode
@@ -419,7 +428,8 @@ function resolveBrowserTarget(mode: string, configuredBrowser?: BrowserTarget): 
 }
 
 function parseBrowserMode(mode: string): BrowserTarget | null {
-  if (mode === 'chrome' || mode === 'firefox') return mode
+  const browserMode = mode.endsWith('-zip') ? mode.slice(0, -'-zip'.length) : mode
+  if (browserMode === 'chrome' || browserMode === 'firefox') return browserMode
   return null
 }
 

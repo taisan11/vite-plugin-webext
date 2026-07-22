@@ -7,7 +7,7 @@
 - `--mode` (`chrome` / `firefox`) でターゲットブラウザを切り替え
 - `--mode` が未指定でもデフォルトターゲットブラウザを設定可能
 - `vite.config.ts` で定義した manifest の生成
-- MagicString による完全静的変換（`chrome` 出力は `chrome.*`、`firefox` 出力は `browser.*`）
+- ブラウザ固有 API の利用可否チェック
 - messaging ヘルパーの型安全 API と静的置換（`runtime.sendMessage` / `tabs.sendMessage`）
 - ブラウザごとの出力ディレクトリ分離
 - `@zip.js/zip.js` を使った zip 生成
@@ -86,6 +86,44 @@ export default defineConfig({
 - `WebExtensionManifest`
 - `(browser) => WebExtensionManifest`
 
+## 未列挙スクリプトの注入
+
+`unlistedScripts` にスクリプト名とソースを指定すると、manifest の `content_scripts` には登録せず、拡張機能のリソースとしてビルドできます。
+
+```ts
+webext({
+  unlistedScripts: {
+    mainWorld: 'src/main-world.ts',
+  },
+  manifest: {
+    manifest_version: 3,
+    name: 'My Extension',
+    version: '1.0.0',
+    content_scripts: [{ matches: ['*://*/*'], js: ['src/content.ts'] }],
+  },
+})
+```
+
+content script から `injectScript('mainWorld')` を呼ぶと、`mainWorld.js` をページの main world に注入します。
+
+未列挙スクリプト側では `defineUnlistedScript` に処理を渡せます。
+
+```ts
+import { defineUnlistedScript } from '@taisan11/vite-plugin-webext/inject-script'
+
+export default defineUnlistedScript(() => {
+  console.log('running in the page')
+})
+```
+
+```ts
+import { injectScript } from '@taisan11/vite-plugin-webext/inject-script'
+
+await injectScript('mainWorld')
+```
+
+`injectScript` は必要な `web_accessible_resources` も自動的に manifest へ追加します。
+
 ## `build.rolldownOptions.input` の設定例
 
 プラグインは渡した `manifest` からバンドルのエントリ入力を自動収集します（background service worker/スクリプト、popup、options、devtools、side panel、sidebar、Chrome URL オーバーライド、sandbox ページ）。通常 `build.rolldownOptions.input` を手動で指定する必要はありません。
@@ -129,16 +167,9 @@ export default defineConfig({
 })
 ```
 
-## 静的変換ポリシー
+## 拡張機能 API namespace
 
-拡張機能のコードは `browser.*` で統一して記述します。
-
-ビルド時に MagicString で完全静的変換を行います。
-
-- `vite build --mode chrome` では `browser.*` を `chrome.*` に変換
-- `vite build --mode firefox` では `browser.*`  を `browser.*` のままにします。
-
-ランタイム shim は注入しません。
+プラグインは `browser.*` / `chrome.*` の参照をそのまま出力します。利用するランタイムとプロジェクト設定に合わせて namespace を選択してください。namespace の変換やランタイム shim の注入は行いません。
 
 Rolldown 側で `experimental.nativeMagicString: true` が有効な場合、このプラグインは利用可能な `meta.magicString` を自動利用します。利用できない環境では従来どおり JavaScript の `magic-string` にフォールバックします。
 
@@ -229,7 +260,7 @@ await sendMessageToTab(1, 'getProfile', { userId: '42' })
 
 ## zip 生成
 
-`--mode` でビルドすると次を生成します。
+`--mode chrome-zip` または `--mode firefox-zip` でビルドした場合だけ、次を生成します。
 
 - `dist/<browser>-<version>-source.zip`
 - `dist/<browser>-<version>-dist.zip`
@@ -241,6 +272,6 @@ Chrome の例:
 - `dist/chrome-1.2.3-dist.zip`
 - `dist/chrome-zip.zip`
 
-`zipArtifacts: false` を指定すると zip 生成を無効化できます。
+通常の `--mode chrome` / `--mode firefox` では zip は生成されません。`zipArtifacts: false` を指定すると `-zip` モードでも zip 生成を無効化できます。
 
 ブラウザ別の出力ディレクトリが存在しない場合（例: `build.write: false`）は、dist zip 生成を警告付きでスキップし、ビルドを失敗させません。
