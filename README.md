@@ -1,5 +1,13 @@
 # vite-plugin-webext
 
+Create a minimal WebExtension project in an empty directory:
+
+```bash
+bunx @taisan11/vite-plugin-webext init .
+```
+
+Pass a directory name instead of `.` to create the project elsewhere. Existing files are never overwritten.
+
 `@taisan11/vite-plugin-webext` is a Vite plugin for cross-browser WebExtension builds.
 
 It supports:

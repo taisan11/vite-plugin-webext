@@ -18,6 +18,16 @@
 bun add @taisan11/vite-plugin-webext
 ```
 
+## 新しいプロジェクトを作成
+
+空のディレクトリで次のコマンドを実行すると、最小構成の WebExtension プロジェクトを生成します。
+
+```bash
+bunx @taisan11/vite-plugin-webext init .
+```
+
+別のディレクトリに生成する場合は、`.` の代わりにディレクトリ名を指定します。既存ファイルは上書きしません。
+
 ## このパッケージのビルド（tsdown）
 
 このプロジェクトは tsup ではなく `tsdown` を利用します。
