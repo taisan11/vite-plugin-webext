@@ -37,7 +37,7 @@ async function main(args: string[]): Promise<void> {
   process.stdout.write('Next steps:\n')
   if (target !== '.') process.stdout.write(`  cd ${target}\n`)
   process.stdout.write('  bun install\n')
-  process.stdout.write('  bun run dev:chrome\n')
+  process.stdout.write('  bun run dev\n')
 }
 
 try {

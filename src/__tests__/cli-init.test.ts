@@ -24,7 +24,9 @@ describe('initProject', () => {
     const packageJson = JSON.parse(await fs.readFile(path.join(result.directory, 'package.json'), 'utf8'))
 
     expect(packageJson.name).toBe('my-extension')
-    expect(packageJson.devDependencies['@taisan11/vite-plugin-webext']).toBe('^0.4.0')
+    expect(packageJson.devDependencies['@taisan11/vite-plugin-webext']).toBe('latest')
+    expect(packageJson.scripts.dev).toBe('vite build --watch --mode chrome')
+    expect(packageJson.scripts['dev:firefox']).toBe('vite build --watch --mode firefox')
     expect(result.files).toContain('vite.config.ts')
     await expect(fs.readFile(path.join(result.directory, 'src/popup/index.html'), 'utf8')).resolves.toContain(
       '<h1>my-extension</h1>',

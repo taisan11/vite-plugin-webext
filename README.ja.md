@@ -28,6 +28,8 @@ bunx @taisan11/vite-plugin-webext init .
 
 別のディレクトリに生成する場合は、`.` の代わりにディレクトリ名を指定します。既存ファイルは上書きしません。
 
+生成される `dev` は `vite build --watch` を使うため、開発中も常に `dist/chrome/` にビルド成果物を書き出します。Firefox 用は `bun run dev:firefox` を使ってください。
+
 ## このパッケージのビルド（tsdown）
 
 このプロジェクトは tsup ではなく `tsdown` を利用します。

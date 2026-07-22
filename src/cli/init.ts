@@ -27,14 +27,15 @@ function templateFiles(directory: string): Record<string, string> {
         version: '0.0.0',
         type: 'module',
         scripts: {
-          'dev:chrome': 'vite --mode chrome',
-          'dev:firefox': 'vite --mode firefox',
+          dev: 'vite build --watch --mode chrome',
+          'dev:chrome': 'vite build --watch --mode chrome',
+          'dev:firefox': 'vite build --watch --mode firefox',
           'build:chrome': 'vite build --mode chrome',
           'build:firefox': 'vite build --mode firefox',
         },
         devDependencies: {
           '@types/chrome': '^0.2.2',
-          '@taisan11/vite-plugin-webext': '^0.4.0',
+          '@taisan11/vite-plugin-webext': 'latest',
           typescript: '^7.0.2',
           vite: '^8.1.5',
         },

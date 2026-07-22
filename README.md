@@ -8,6 +8,8 @@ bunx @taisan11/vite-plugin-webext init .
 
 Pass a directory name instead of `.` to create the project elsewhere. Existing files are never overwritten.
 
+The generated `dev` script runs `vite build --watch`, so development builds are always written to `dist/chrome/`. Use `bun run dev:firefox` for Firefox.
+
 `@taisan11/vite-plugin-webext` is a Vite plugin for cross-browser WebExtension builds.
 
 It supports:
