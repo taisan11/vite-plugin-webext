@@ -7,6 +7,8 @@ import {
   FIREFOX_ONLY_APIS,
   hasApiNamespaceAccess,
   hasUnavailableApiAccess,
+  resolveApiNamespace,
+  rewriteApiNamespaces,
 } from './browser/api-transform.ts'
 import {
   prepareI18nArtifacts,
@@ -47,6 +49,13 @@ export interface WebExtOptions {
    * - 'ignore' : silently skip
    */
   unavailableApi?: 'error' | 'warn' | 'ignore'
+  /**
+   * Rewrite `browser.*` and `chrome.*` references to the active browser namespace.
+   * Defaults to true.
+   */
+  staticTransform?: boolean
+  /** Backward-compatible alias for `staticTransform`. */
+  injectGlobals?: boolean
   /**
    * Manifest definition written to `manifest.json` during build.
    * You can pass a plain object or a factory function per browser target.
@@ -108,6 +117,8 @@ export function webext(options: WebExtOptions): Plugin {
     defaultBrowser,
     browser,
     unavailableApi = 'error',
+    staticTransform = true,
+    injectGlobals,
     manifest,
     zipArtifacts = true,
     i18n,
@@ -115,6 +126,7 @@ export function webext(options: WebExtOptions): Plugin {
     unlistedScript,
   } = options
   const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser)
+  const shouldTransformNamespaces = injectGlobals ?? staticTransform
   const resolvedI18nOptions = resolveI18nOptions(i18n)
   const configuredUnlistedScripts = resolveUnlistedScripts(unlistedScripts, unlistedScript)
 
@@ -133,6 +145,7 @@ export function webext(options: WebExtOptions): Plugin {
     let transformedCodeForChecks = code
     let i18nRewriteCount = 0
     let messagingRewriteCount = 0
+    let namespaceRewriteCount = 0
 
     if (resolvedI18nOptions.enabled) {
       const i18nRewritten = rewriteI18nTCalls(
@@ -196,6 +209,34 @@ export function webext(options: WebExtOptions): Plugin {
         ctx.error(message)
       } else if (unavailableApi === 'warn') {
         ctx.warn(message)
+      }
+    }
+
+    if (shouldTransformNamespaces) {
+      const targetNamespace = resolveApiNamespace(currentBrowser)
+      const rewritten = rewriteApiNamespaces(
+        magic ? code : transformedCodeForChecks,
+        parse,
+        targetNamespace,
+        magic ? { magicString: magic, returnMagicString: true } : {},
+      )
+      namespaceRewriteCount = rewritten.count
+      if (namespaceRewriteCount > 0) {
+        ctx.warn(
+          `[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
+        )
+      }
+      if (magic) {
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null
+        return { code: magic as unknown as string, map: null }
+      }
+      if (rewritten.count === 0) {
+        if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
+        return { code: transformedCodeForChecks, map: null }
+      }
+      return {
+        code: rewritten.code.toString(),
+        map: i18nRewriteCount > 0 || messagingRewriteCount > 0 ? null : rewritten.map,
       }
     }
 

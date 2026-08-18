@@ -64,7 +64,7 @@ vite build --mode firefox
 
 Output is written to `dist/chrome/` and `dist/firefox/`. If the mode is neither `chrome` nor `firefox`, `defaultBrowser` (or the backwards-compatible `browser` option) is used.
 
-Browser API namespaces are not rewritten. Choose `browser.*` or `chrome.*` according to the runtime and polyfills used by your project.
+Write extension code with `browser.*` by default. The plugin statically rewrites API namespaces to `chrome.*` for Chrome builds and `browser.*` for Firefox builds. No runtime shim is injected. Set `staticTransform: false` to disable this behavior.
 
 ## Automatic entries
 

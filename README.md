@@ -17,6 +17,7 @@ It supports:
 - Browser target resolution from `--mode` (`chrome` / `firefox`)
 - Configurable default browser when `--mode` is not set
 - Manifest generation from `vite.config.ts`
+- Static browser API namespace rewriting (`browser.*` to `chrome.*` for Chrome builds)
 - Extension API availability checks for browser-specific APIs
 - Type-safe messaging helpers with static replacement (`runtime.sendMessage` / `tabs.sendMessage`)
 - Browser-separated output directories
@@ -169,9 +170,16 @@ export default defineConfig({
 
 ## Extension API namespaces
 
-The plugin leaves `browser.*` and `chrome.*` references unchanged. Choose the
-namespace your runtime and project setup provide; no namespace rewrite or
-runtime shim is injected.
+Write extension code with `browser.*` by default. The plugin rewrites API
+namespace references to the active browser target during the build:
+
+- Chrome builds use `chrome.*`.
+- Firefox builds use `browser.*`.
+- No runtime shim is injected.
+
+Static rewriting is enabled by default. Set `staticTransform: false` to keep
+the source namespace unchanged. The legacy `injectGlobals` option is accepted
+as an alias.
 
 When running on Rolldown with `experimental.nativeMagicString: true`, the plugin automatically uses the native `meta.magicString` object when it is available and falls back to the JavaScript `magic-string` package otherwise.
 

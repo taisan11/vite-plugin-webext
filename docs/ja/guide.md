@@ -64,7 +64,7 @@ vite build --mode firefox
 
 出力先はそれぞれ `dist/chrome/`、`dist/firefox/` です。`--mode` が `chrome` / `firefox` 以外の場合は `defaultBrowser`（または後方互換の `browser`）が使われます。
 
-ブラウザAPIの namespace は変換されません。`browser.*` / `chrome.*` のどちらを使うかは、利用するランタイムとプロジェクトのポリフィル設定に合わせてください。
+拡張機能のソースはデフォルトで `browser.*` を使って記述します。プラグインがビルド時に Chrome では `chrome.*` へ、Firefox では `browser.*` へ静的変換します。ランタイム shim は注入しません。無効化する場合は `staticTransform: false` を指定してください。
 
 ## エントリの自動収集
 

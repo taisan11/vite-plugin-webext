@@ -7,6 +7,7 @@
 - `--mode` (`chrome` / `firefox`) でターゲットブラウザを切り替え
 - `--mode` が未指定でもデフォルトターゲットブラウザを設定可能
 - `vite.config.ts` で定義した manifest の生成
+- ブラウザ API namespace の静的変換（Chrome build では `browser.*` を `chrome.*` に変換）
 - ブラウザ固有 API の利用可否チェック
 - messaging ヘルパーの型安全 API と静的置換（`runtime.sendMessage` / `tabs.sendMessage`）
 - ブラウザごとの出力ディレクトリ分離
@@ -169,7 +170,13 @@ export default defineConfig({
 
 ## 拡張機能 API namespace
 
-プラグインは `browser.*` / `chrome.*` の参照をそのまま出力します。利用するランタイムとプロジェクト設定に合わせて namespace を選択してください。namespace の変換やランタイム shim の注入は行いません。
+拡張機能のソースは、デフォルトで `browser.*` を使って記述します。ビルド時にターゲットへ合わせて namespace を静的変換します。
+
+- Chrome build では `chrome.*` に変換します。
+- Firefox build では `browser.*` に変換します。
+- ランタイム shim は注入しません。
+
+静的変換はデフォルトで有効です。ソースの namespace をそのまま出力する場合は `staticTransform: false` を指定してください。後方互換のため `injectGlobals` もエイリアスとして利用できます。
 
 Rolldown 側で `experimental.nativeMagicString: true` が有効な場合、このプラグインは利用可能な `meta.magicString` を自動利用します。利用できない環境では従来どおり JavaScript の `magic-string` にフォールバックします。
 

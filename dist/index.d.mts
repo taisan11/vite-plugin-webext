@@ -525,6 +525,13 @@ interface WebExtOptions {
    */
   unavailableApi?: 'error' | 'warn' | 'ignore';
   /**
+   * Rewrite `browser.*` and `chrome.*` references to the active browser namespace.
+   * Defaults to true.
+   */
+  staticTransform?: boolean;
+  /** Backward-compatible alias for `staticTransform`. */
+  injectGlobals?: boolean;
+  /**
    * Manifest definition written to `manifest.json` during build.
    * You can pass a plain object or a factory function per browser target.
    */

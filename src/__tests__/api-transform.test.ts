@@ -4,6 +4,8 @@ import {
   hasUnavailableApiAccess,
   CHROME_ONLY_APIS,
   FIREFOX_ONLY_APIS,
+  resolveApiNamespace,
+  rewriteApiNamespaces,
 } from '../browser/api-transform.ts'
 
 describe('hasApiNamespaceAccess', () => {
@@ -43,5 +45,33 @@ describe('API availability lists', () => {
     for (const api of firefoxSet) {
       expect(chromeSet.has(api)).toBe(false)
     }
+  })
+})
+
+describe('rewriteApiNamespaces', () => {
+  const parse = (source: string) => ({
+    type: 'Program',
+    body: [{
+      type: 'ExpressionStatement',
+      expression: {
+        type: 'MemberExpression',
+        computed: false,
+        object: { type: 'Identifier', name: 'browser', start: 0, end: 7 },
+        property: { type: 'Identifier', name: 'runtime', start: 8, end: 15 },
+        start: 0,
+        end: source.length,
+      },
+    }],
+  })
+
+  it('resolves the native namespace for each browser target', () => {
+    expect(resolveApiNamespace('chrome')).toBe('chrome')
+    expect(resolveApiNamespace('firefox')).toBe('browser')
+  })
+
+  it('rewrites browser member access to chrome', () => {
+    const result = rewriteApiNamespaces('browser.runtime', parse, 'chrome')
+    expect(result.count).toBe(1)
+    expect(result.code).toBe('chrome.runtime')
   })
 })
