@@ -10,5 +10,7 @@ declare global {
     readonly IS_FIREFOX: boolean
     /** true when building for Chrome */
     readonly IS_CHROME: boolean
+    /** Build-time map of unlisted script names to Vite output paths */
+    readonly WEBEXT_UNLISTED_SCRIPT_PATHS: string | Readonly<Record<string, string>>
   }
 }

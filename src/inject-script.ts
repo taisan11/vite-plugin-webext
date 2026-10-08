@@ -66,7 +66,7 @@ export async function injectScript(
     throw new Error('[vite-plugin-webext] `injectScript(...)` must be called from a content script.')
   }
 
-  const scriptPath = name.endsWith('.js') ? name : `${name}.js`
+  const scriptPath = resolveUnlistedScriptPath(name)
   const script = document.createElement('script')
   script.src = runtime.getURL(scriptPath)
   script.type = 'module'
@@ -86,4 +86,18 @@ export async function injectScript(
     }
     parent.appendChild(script)
   })
+}
+
+function resolveUnlistedScriptPath(name: string): string {
+  const entryName = name.endsWith('.js') ? name.slice(0, -3) : name
+  const configuredPaths = import.meta.env.WEBEXT_UNLISTED_SCRIPT_PATHS
+  const scriptPaths =
+    typeof configuredPaths === 'string'
+      ? (JSON.parse(configuredPaths) as Record<string, unknown>)
+      : (configuredPaths as Record<string, unknown> | undefined)
+  const file = scriptPaths?.[entryName]
+  if (typeof file !== 'string') {
+    throw new Error(`[vite-plugin-webext] Could not find unlisted script "${name}" in the Vite build manifest.`)
+  }
+  return file
 }

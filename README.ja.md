@@ -123,7 +123,9 @@ import { injectScript } from '@taisan11/vite-plugin-webext/inject-script'
 await injectScript('mainWorld')
 ```
 
-`injectScript` は必要な `web_accessible_resources` も自動的に manifest へ追加します。
+`injectScript` は注入対象スクリプトを `web_accessible_resources` に自動登録します。未列挙スクリプトがあるビルドでは Vite の build manifest（既定 `.vite/manifest.json`）をビルド時に読み、ハッシュ付き出力ファイル名を Content Script に埋め込みます。Vite manifest 自体は WAR に登録しません。
+
+Content Script または未列挙スクリプトがあるビルドでは、ブラウザーが直接読み込めない分割チャンクへの依存を避けるため、Rolldown の code splitting を無効にします。その分、複数エントリー間で共有コードが重複して出力されることがあります。
 
 ## `build.rolldownOptions.input` の設定例
 
@@ -201,6 +203,8 @@ webext({
 ```
 
 `src/locale/[localeName].ts` で `defineLocale(...)` を export すると、メッセージ id が収集されます。
+
+> **TODO:** 現在のロケール解析は静的なオブジェクトリテラルを前提としています。値に変数・関数呼び出し・式を使った場合、それらは実行・評価されず、正しいメッセージ JSON にならないことがあります。将来的に TypeScript AST を使った解析へ置き換える予定です。
 
 ```ts
 import { defineLocale } from '@taisan11/vite-plugin-webext/i18n'

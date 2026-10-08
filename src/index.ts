@@ -25,12 +25,15 @@ import { collectManifestInputs } from './utils/manifest-inputs.ts'
 import { normalizePath } from './utils/path.ts'
 import {
   collectUnlistedScriptInputs,
+  normalizeUnlistedScriptName,
   resolveUnlistedScriptManifest,
   type UnlistedScripts,
 } from './utils/unlisted-scripts.ts'
 
 export type BrowserTarget = 'chrome' | 'firefox'
 export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
+
+const UNLISTED_SCRIPT_PATHS_PLACEHOLDER = '__VITE_PLUGIN_WEBEXT_UNLISTED_SCRIPT_PATHS__'
 
 export interface WebExtOptions {
   /**
@@ -137,6 +140,7 @@ export function webext(options: WebExtOptions): Plugin {
   let rootDir = process.cwd()
   let browserOutDir = path.resolve(rootDir, 'dist')
   let distRootDir = browserOutDir
+  let viteManifestFileName = '.vite/manifest.json'
   let isBuild = false
   let isZipMode = false
 
@@ -262,6 +266,8 @@ export function webext(options: WebExtOptions): Plugin {
           )
         : null
       const outDir = withBrowserSubDir(userConfig.build?.outDir ?? 'dist', activeBrowser)
+      const hasUnlistedScripts = Object.keys(configuredUnlistedScripts).length > 0
+      const configuredViteManifest = userConfig.build?.manifest
 
       const currentRootDir = userConfig.root ? path.resolve(userConfig.root) : process.cwd()
       const autoInputs = resolvedManifest
@@ -274,9 +280,15 @@ export function webext(options: WebExtOptions): Plugin {
           'import.meta.env.BROWSER': JSON.stringify(activeBrowser),
           'import.meta.env.IS_FIREFOX': JSON.stringify(activeBrowser === 'firefox'),
           'import.meta.env.IS_CHROME': JSON.stringify(activeBrowser === 'chrome'),
+          'import.meta.env.WEBEXT_UNLISTED_SCRIPT_PATHS': hasUnlistedScripts
+            ? UNLISTED_SCRIPT_PATHS_PLACEHOLDER
+            : '{}',
         },
         build: {
           outDir,
+          ...(hasUnlistedScripts
+            ? { manifest: typeof configuredViteManifest === 'string' ? configuredViteManifest : true }
+            : {}),
           rolldownOptions: {
             input: { ...autoInputs, ...unlistedInputs },
           },
@@ -295,6 +307,13 @@ export function webext(options: WebExtOptions): Plugin {
         : null
       browserOutDir = path.resolve(rootDir, config.build.outDir)
       distRootDir = path.resolve(browserOutDir, '..')
+      if (Object.keys(configuredUnlistedScripts).length > 0 && !config.build.manifest) {
+        config.build.manifest = true
+      }
+      viteManifestFileName =
+        typeof config.build.manifest === 'string'
+          ? normalizePath(config.build.manifest)
+          : '.vite/manifest.json'
 
       if (resolvedManifest) {
         const autoInputs = collectManifestInputs(resolvedManifest, rootDir)
@@ -308,6 +327,17 @@ export function webext(options: WebExtOptions): Plugin {
         }
       }
 
+      const hasContentScriptEntries = resolvedManifest?.content_scripts?.some(
+        (contentScript) => (contentScript.js?.length ?? 0) > 0,
+      )
+      if (hasContentScriptEntries || Object.keys(configuredUnlistedScripts).length > 0) {
+        const rolldownOptions = (config.build.rolldownOptions ?? {}) as Record<string, unknown>
+        config.build.rolldownOptions = {
+          ...rolldownOptions,
+          output: disableCodeSplitting(rolldownOptions.output),
+        }
+      }
+
       if (resolvedI18nOptions.enabled) {
         const prepared = await prepareI18nArtifacts(rootDir, resolvedI18nOptions)
         localeMessageIds = prepared.messageIds
@@ -318,22 +348,34 @@ export function webext(options: WebExtOptions): Plugin {
     generateBundle: {
       order: 'post',
       handler(_, bundle) {
-        if (!manifest || !resolvedManifest) return
-
         const outputBundle = bundle as OutputBundleLike
         rewriteSourcePrefixedBundlePaths(outputBundle)
 
+        let manifestWithResolvedPaths =
+          manifest && resolvedManifest
+            ? resolveManifestPathsFromBundle(resolvedManifest, outputBundle, rootDir)
+            : null
+
+        if (Object.keys(configuredUnlistedScripts).length > 0) {
+          const unlistedOutputPaths = resolveUnlistedScriptOutputPaths(
+            outputBundle,
+            viteManifestFileName,
+            configuredUnlistedScripts,
+            rootDir,
+          )
+          if (manifestWithResolvedPaths) {
+            rewriteUnlistedScriptResourcePaths(manifestWithResolvedPaths, unlistedOutputPaths)
+          }
+          rewriteUnlistedScriptPathPlaceholder(outputBundle, unlistedOutputPaths)
+        }
+
+        if (!manifest || !manifestWithResolvedPaths) return
         if (outputBundle['manifest.json']) {
           this.error(
             '[vite-plugin-webext] `manifest.json` already exists in build output. Remove the duplicate or omit `webext({ manifest })`.',
           )
         }
 
-        const manifestWithResolvedPaths = resolveManifestPathsFromBundle(
-          resolvedManifest,
-          outputBundle,
-          rootDir,
-        )
         resolvedManifest = manifestWithResolvedPaths
 
         this.emitFile({
@@ -411,6 +453,7 @@ export function webext(options: WebExtOptions): Plugin {
 interface BundleChunkLike {
   type: 'chunk'
   fileName: string
+  code: string
   imports: string[]
   dynamicImports: string[]
   implicitlyLoadedBefore: string[]
@@ -422,6 +465,7 @@ interface BundleChunkLike {
 interface BundleAssetLike {
   type: 'asset'
   fileName: string
+  source?: string | Uint8Array
   originalFileNames?: string[]
   originalFileName?: string
   names?: string[]
@@ -499,6 +543,17 @@ function withBrowserSubDir(outDir: string, browser: BrowserTarget): string {
   return path.join(outDir, browser)
 }
 
+function disableCodeSplitting(output: unknown): unknown {
+  if (Array.isArray(output)) {
+    return output.map((options) => disableCodeSplitting(options))
+  }
+
+  return {
+    ...(output && typeof output === 'object' ? output : {}),
+    codeSplitting: false,
+  }
+}
+
 function resolveManifest(
   manifest: WebExtensionManifest | ManifestFactory,
   browser: BrowserTarget,
@@ -547,6 +602,91 @@ function resolveManifestPathsFromBundle(
 ): WebExtensionManifest {
   const sourceToOutput = buildSourceToOutputPathMap(bundle, rootDir)
   return rewriteManifestPathLikeStrings(manifest, sourceToOutput)
+}
+
+interface ViteManifestEntryLike {
+  file?: unknown
+  name?: unknown
+  src?: unknown
+  isEntry?: unknown
+}
+
+function resolveUnlistedScriptOutputPaths(
+  bundle: OutputBundleLike,
+  manifestFileName: string,
+  scripts: UnlistedScripts,
+  rootDir: string,
+): Map<string, string> {
+  const manifestAsset = bundle[normalizePath(manifestFileName)]
+  if (!manifestAsset || manifestAsset.type !== 'asset' || manifestAsset.source == null) {
+    throw new Error(
+      `[vite-plugin-webext] Could not find Vite build manifest "${manifestFileName}". ` +
+        'Unlisted scripts require build.manifest to be enabled.',
+    )
+  }
+
+  const source =
+    typeof manifestAsset.source === 'string'
+      ? manifestAsset.source
+      : new TextDecoder().decode(manifestAsset.source)
+  const viteManifest = JSON.parse(source) as Record<string, ViteManifestEntryLike>
+  const entries = Object.values(viteManifest).filter((entry) => entry.isEntry === true)
+  const outputPaths = new Map<string, string>()
+
+  for (const [configuredName, sourcePath] of Object.entries(scripts)) {
+    const name = normalizeUnlistedScriptName(configuredName)
+    const normalizedSource = normalizeSourcePath(
+      path.relative(rootDir, path.resolve(rootDir, normalizePath(sourcePath).replace(/^\.\//, ''))),
+    )
+    const entry =
+      entries.find(
+        (candidate) =>
+          typeof candidate.src === 'string' &&
+          normalizeSourcePath(candidate.src) === normalizedSource,
+      ) ?? entries.find((candidate) => candidate.name === name)
+
+    if (!entry || typeof entry.file !== 'string') {
+      throw new Error(
+        `[vite-plugin-webext] Could not resolve the output for unlisted script "${configuredName}" ` +
+          `from Vite manifest "${manifestFileName}".`,
+      )
+    }
+
+    outputPaths.set(`${name}.js`, normalizePath(entry.file))
+  }
+
+  return outputPaths
+}
+
+function rewriteUnlistedScriptResourcePaths(
+  manifest: WebExtensionManifest,
+  outputPaths: Map<string, string>,
+) {
+  const resources = manifest.web_accessible_resources
+  if (!Array.isArray(resources)) return
+
+  const rewrite = (resource: string) => outputPaths.get(normalizePath(resource)) ?? resource
+  manifest.web_accessible_resources = resources.flatMap((entry) => {
+    if (typeof entry === 'string') return [rewrite(entry)]
+    return [{ ...entry, resources: entry.resources.map(rewrite) }]
+  })
+}
+
+function rewriteUnlistedScriptPathPlaceholder(
+  bundle: OutputBundleLike,
+  outputPaths: Map<string, string>,
+) {
+  const placeholder = UNLISTED_SCRIPT_PATHS_PLACEHOLDER
+  const scriptPaths = Object.fromEntries(
+    [...outputPaths].map(([resourceName, outputPath]) => [resourceName.replace(/\.js$/, ''), outputPath]),
+  )
+  const replacement = JSON.stringify(scriptPaths)
+
+  for (const output of Object.values(bundle)) {
+    if (output.type === 'chunk' && output.code.includes(placeholder)) {
+      output.code = output.code.replaceAll(placeholder, replacement)
+    }
+  }
 }
 
 function buildSourceToOutputPathMap(bundle: OutputBundleLike, rootDir: string): Map<string, string> {
