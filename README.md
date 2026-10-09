@@ -1,4 +1,4 @@
-# vite-plugin-webext
+# @taisan11/vite-plugin-webext
 
 Create a minimal WebExtension project in an empty directory:
 
@@ -6,38 +6,7 @@ Create a minimal WebExtension project in an empty directory:
 bunx @taisan11/vite-plugin-webext init .
 ```
 
-Pass a directory name instead of `.` to create the project elsewhere. Existing files are never overwritten.
-
-The generated `dev` script runs `vite build --watch`, so development builds are always written to `dist/chrome/`. Use `bun run dev:firefox` for Firefox.
-
-`@taisan11/vite-plugin-webext` is a Vite plugin for cross-browser WebExtension builds.
-
-It supports:
-
-- Browser target resolution from `--mode` (`chrome` / `firefox`)
-- Configurable default browser when `--mode` is not set
-- Manifest generation from `vite.config.ts`
-- Static browser API namespace rewriting (`browser.*` to `chrome.*` for Chrome builds)
-- Extension API availability checks for browser-specific APIs
-- Type-safe messaging helpers with static replacement (`runtime.sendMessage` / `tabs.sendMessage`)
-- Browser-separated output directories
-- Zip artifact generation via `@zip.js/zip.js`
-
-## Install
-
-```bash
-bun add @taisan11/vite-plugin-webext
-```
-
-## Build this package with tsdown
-
-This project uses `tsdown` (replacement for tsup).
-
-```bash
-bun run build
-```
-
-`build` runs `tsdown --dts`, so JS bundle and `.d.ts` are generated together.
+**A simple Vite plugin to easily create lightweight extensions.**
 
 ## Browser target by `--mode`
 
