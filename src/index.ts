@@ -170,9 +170,6 @@ export function webext(options: WebExtOptions): Plugin {
       if (i18nRewritten.count > 0) {
         i18nRewriteCount = i18nRewritten.count
         transformedCodeForChecks = magic ? magic.toString() : i18nRewritten.code.toString()
-        ctx.warn(
-          `[vite-plugin-webext] Rewrote ${i18nRewriteCount} i18n call(s) to "${apiNamespace}.i18n.getMessage(...)" in ${id}.`,
-        )
       }
     }
 
@@ -184,9 +181,6 @@ export function webext(options: WebExtOptions): Plugin {
     if (messagingRewritten.count > 0) {
       messagingRewriteCount = messagingRewritten.count
       transformedCodeForChecks = magic ? magic.toString() : messagingRewritten.code.toString()
-      ctx.warn(
-        `[vite-plugin-webext] Rewrote ${messagingRewriteCount} messaging helper call(s) to native extension APIs in ${id}.`,
-      )
     }
 
     const hasNamespaceAccess = hasApiNamespaceAccess(transformedCodeForChecks)
@@ -225,11 +219,6 @@ export function webext(options: WebExtOptions): Plugin {
         magic ? { magicString: magic, returnMagicString: true } : {},
       )
       namespaceRewriteCount = rewritten.count
-      if (namespaceRewriteCount > 0) {
-        ctx.warn(
-          `[vite-plugin-webext] Rewrote ${namespaceRewriteCount} API namespace reference(s) to "${targetNamespace}.*" in ${id}.`,
-        )
-      }
       if (magic) {
         if (i18nRewriteCount === 0 && messagingRewriteCount === 0 && namespaceRewriteCount === 0) return null
         return { code: magic as unknown as string, map: null }
