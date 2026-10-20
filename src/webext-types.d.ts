@@ -3,6 +3,10 @@
 export {}
 
 declare global {
+  interface ImportMeta {
+    readonly env: ImportMetaEnv
+  }
+
   interface ImportMetaEnv {
     /** Target browser for this build: 'chrome' | 'firefox' */
     readonly BROWSER: 'chrome' | 'firefox'

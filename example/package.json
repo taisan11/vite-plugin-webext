@@ -4,10 +4,13 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "dev": "vite",
+    "dev:chrome": "vite --mode chrome",
+    "dev:firefox": "vite --mode firefox",
     "build:chrome": "vite build --mode chrome",
     "build:firefox": "vite build --mode firefox"
   },
   "devDependencies": {
-    "vite": "^8.1.5"
+    "vite": "^8.3.4"
   }
 }

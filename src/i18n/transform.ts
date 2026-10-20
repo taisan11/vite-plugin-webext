@@ -94,8 +94,15 @@ export async function prepareI18nArtifacts(
   }
 
   const generatedDtsPath = path.resolve(rootDir, options.generatedDtsPath)
-  await fs.mkdir(path.dirname(generatedDtsPath), { recursive: true })
-  await fs.writeFile(generatedDtsPath, renderLocaleMessageIdDts(messageIds))
+  const generatedDts = renderLocaleMessageIdDts(messageIds)
+  const existingDts = await fs.readFile(generatedDtsPath, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return null
+  })
+  if (existingDts !== generatedDts) {
+    await fs.mkdir(path.dirname(generatedDtsPath), { recursive: true })
+    await fs.writeFile(generatedDtsPath, generatedDts)
+  }
 
   return { messageIds, localeEntries }
 }

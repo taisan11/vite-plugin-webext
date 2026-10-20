@@ -16,11 +16,13 @@ From this directory:
 
 ```bash
 bun install
+bun run dev             # Chrome development server + watch build
+# bun run dev:firefox    # Firefox development
 bun run build:chrome
 bun run build:firefox
 ```
 
-Output is written to `dist/chrome` and `dist/firefox`.
+Output is written to `dist/chrome` and `dist/firefox`. Development mode rebuilds on changes; reload the extension (and affected content-script tabs) manually after rebuilding.
 
 Load the generated folder as an unpacked extension:
 

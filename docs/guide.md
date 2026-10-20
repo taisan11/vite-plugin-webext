@@ -2,7 +2,7 @@
 
 ## Install
 
-Add the plugin to an existing project:
+Requires Vite `^8.3.4`. Add the plugin to an existing project:
 
 ```bash
 bun add @taisan11/vite-plugin-webext
@@ -43,7 +43,7 @@ export default defineConfig({
 })
 ```
 
-`manifest` accepts a `WebExtensionManifest` object or a factory receiving the target browser:
+`manifest` is required and accepts a `WebExtensionManifest` object or a factory receiving the target browser:
 
 ```ts
 webext({
@@ -62,7 +62,7 @@ vite build --mode chrome
 vite build --mode firefox
 ```
 
-Output is written to `dist/chrome/` and `dist/firefox/`. If the mode is neither `chrome` nor `firefox`, `defaultBrowser` (or the backwards-compatible `browser` option) is used.
+Output is written to `dist/chrome/` and `dist/firefox/`. If the mode is neither `chrome` nor `firefox`, `defaultBrowser` is used.
 
 Write extension code with `browser.*` by default. The plugin statically rewrites API namespaces to `chrome.*` for Chrome builds and `browser.*` for Firefox builds. No runtime shim is injected. Set `staticTransform: false` to disable this behavior.
 
@@ -76,11 +76,15 @@ The plugin collects these inputs from the manifest:
 - Chrome URL overrides and sandbox pages
 - `content_scripts[].js`
 
-Additional entries can be supplied through `build.rolldownOptions.input`. They are merged with the automatic entries, with user-defined keys taking precedence.
+Additional entries can be supplied through top-level `input` or `build.rolldownOptions.input` as strings, arrays, or named objects. Named user entries take precedence over automatic entries, and low-level input takes precedence over top-level input. Strings/arrays add entries without replacing automatic entries.
+
+Vite's build manifest is always generated. Output filenames are preserved; resource references in the extension manifest are resolved from Vite's output metadata. Content scripts and unlisted scripts are bundled independently; HTML pages keep normal Vite code splitting.
 
 ## Development builds
 
-The generated `dev` script runs `vite build --watch --mode chrome`. It writes extension artifacts to `dist/chrome/` on every change instead of starting a regular Vite web server.
+The generated `dev` script runs `vite` with the configured `defaultBrowser`. With `webext({ manifest })`, the Vite dev server also starts a watch build and waits for the first build to finish. Extension artifacts are written to `dist/chrome/` or `dist/firefox/` on every change; custom `build.outDir` is respected. Stopping the server stops the build watcher too.
+
+You can also run `vite --mode chrome` or `vite --mode firefox` directly. Load the output folder as an unpacked/temporary extension. After a rebuild, reload the extension and any tabs using its content scripts. Automatic extension reload and HMR inside the installed extension are not provided. HTML pages served directly by Vite retain normal Vite HMR but do not have extension API access. `vite build --watch` remains supported.
 
 ```bash
 bun run dev
@@ -102,4 +106,4 @@ The generated files are:
 - `<browser>-<version>-dist.zip`
 - `<browser>-zip.zip`
 
-Regular `chrome` and `firefox` builds do not create ZIP files. Set `zipArtifacts: false` to disable ZIP creation even in a `-zip` mode.
+Regular `chrome` and `firefox` builds do not create ZIP files. ZIP generation is controlled only by mode; there is no `zipArtifacts` option. No ZIP files are created with `build.write: false`.

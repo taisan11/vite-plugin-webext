@@ -48,7 +48,9 @@ vite build --mode chrome
 vite build --mode firefox
 ```
 
-If `--mode` is not `chrome` or `firefox`, set `defaultBrowser`. The legacy `browser` option is still accepted as an alias.
+Requires Vite `^8.3.4`. `manifest` is required. If mode does not select a browser, set `defaultBrowser`. The `browser`, `injectGlobals`, `unlistedScript`, and `zipArtifacts` options have been removed.
+
+For development, run `vite` (using `defaultBrowser`) or `vite --mode chrome|firefox`. The server also maintains an on-disk watch build. Reload the extension manually after changes.
 
 ## Multi-Entry Extensions
 
@@ -75,7 +77,7 @@ export default defineConfig({
 })
 ```
 
-If a project needs extra inputs not present in the manifest, pass them via `build.rolldownOptions.input`; the plugin merges user inputs on top of the auto-derived ones (user keys win).
+Extra top-level `input` and `build.rolldownOptions.input` accept strings, arrays, and named objects. Named user entries override automatic entries, with low-level input taking priority over top-level input. Strings/arrays add entries without replacing automatic entries. Paths are resolved relative to Vite's root.
 
 ```ts
 export default defineConfig({
@@ -104,12 +106,13 @@ Unavailable APIs are checked at build time. Configure behavior with `unavailable
 
 ```ts
 webext({
+  manifest,
   defaultBrowser: 'chrome',
   unavailableApi: 'warn',
 })
 ```
 
-Disable static namespace rewriting with `staticTransform: false` when a project intentionally manages namespaces itself. The legacy `injectGlobals` option is accepted as an alias.
+`staticTransform: false` disables namespace rewriting only. Unavailable-API validation and i18n/messaging helper transforms remain independent; helpers always use the selected browser's namespace.
 
 When Vite/Rolldown provides `meta.magicString` through `experimental.nativeMagicString: true`, the plugin uses it automatically and falls back to the JavaScript `magic-string` package otherwise.
 
@@ -129,6 +132,7 @@ Enable i18n when the project wants typed locale ids and static `t(id)` replaceme
 
 ```ts
 webext({
+  manifest,
   i18n: true,
 })
 ```
@@ -152,12 +156,13 @@ import { t } from '@taisan11/vite-plugin-webext/i18n'
 document.title = t('appTitle')
 ```
 
-At build time, static calls are rewritten to `browser.i18n.getMessage(...)` or `chrome.i18n.getMessage(...)`, depending on the target and namespace rewrite settings.
+Helpers emit `browser.i18n.getMessage(...)` or `chrome.i18n.getMessage(...)` for the target, independently of `staticTransform`. `<localeDir>/webext-i18n.d.ts` is generated in both dev and production builds and updated on locale changes.
 
 Customize the locale directory with:
 
 ```ts
 webext({
+  manifest,
   i18n: {
     localeDir: 'src/locales',
   },
@@ -179,15 +184,11 @@ At build time, helper calls are statically replaced with native `runtime.sendMes
 
 ## Manifest And Artifacts
 
-Pass `manifest` as a plain object or `(browser) => manifest`. The plugin emits `manifest.json` during build and rewrites path-like manifest strings to match generated bundle paths.
+`manifest` is required as an object or `(browser) => manifest`. The plugin always enables Vite's build manifest (default `.vite/manifest.json`) and uses it to resolve extension resource paths. HTML pages are resolved from emitted asset metadata. Never rename generated output files or strip `src/` from their paths. `manifest.json` is reserved for the extension manifest.
 
-Zip artifacts are enabled by default. Disable them when not needed:
+Content scripts and unlisted scripts are independently bundled without shared JS imports; HTML pages keep Vite's code splitting. Use `unlistedScripts: { main: 'src/main-world.ts' }` even for one script.
 
-```ts
-webext({
-  zipArtifacts: false,
-})
-```
+ZIP artifacts are controlled only by `vite build --mode chrome-zip|firefox-zip`. Ordinary browser modes do not create ZIPs. `build.write: false` also skips ZIP generation.
 
 ## Validation
 

@@ -26,10 +26,7 @@ export function resolveUnlistedScriptManifest(
   const resolved = structuredClone(manifest)
   const existing = resolved.web_accessible_resources
 
-  if (
-    resolved.manifest_version === 2 ||
-    (Array.isArray(existing) && existing.every((entry) => typeof entry === 'string'))
-  ) {
+  if (resolved.manifest_version === 2) {
     resolved.web_accessible_resources = [
       ...(Array.isArray(existing)
         ? existing.filter((entry): entry is string => typeof entry === 'string')

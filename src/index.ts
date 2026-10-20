@@ -1,7 +1,9 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from '@zip.js/zip.js'
-import type { Plugin, UserConfig } from 'vite'
+import type { Plugin } from 'vite'
+import { bundleStandaloneScripts } from './standalone.ts'
+import { startDevBuild, type DevBuildWatcher } from './dev.ts'
 import {
   CHROME_ONLY_APIS,
   FIREFOX_ONLY_APIS,
@@ -21,6 +23,12 @@ import {
 import type { MagicStringLike } from './magic-string.ts'
 import { rewriteMessagingCalls } from './messaging/transform.ts'
 import type { WebExtensionManifest } from './types/manifest.ts'
+import { mergeBuildInputs } from './utils/build-inputs.ts'
+import {
+  createOutputPathResolver,
+  readBuildManifest,
+  resolveExtensionManifestPaths,
+} from './utils/build-manifest.ts'
 import { collectManifestInputs } from './utils/manifest-inputs.ts'
 import { normalizePath } from './utils/path.ts'
 import {
@@ -36,54 +44,21 @@ export type ManifestFactory = (browser: BrowserTarget) => WebExtensionManifest
 const UNLISTED_SCRIPT_PATHS_PLACEHOLDER = '__VITE_PLUGIN_WEBEXT_UNLISTED_SCRIPT_PATHS__'
 
 export interface WebExtOptions {
-  /**
-   * Default browser target used when Vite mode is not `chrome` or `firefox`.
-   */
+  /** Fallback target when mode is not chrome / firefox (or their -zip modes). */
   defaultBrowser?: BrowserTarget
-  /**
-   * Target browser for this build.
-   * Backward-compatible alias for `defaultBrowser`.
-   */
-  browser?: BrowserTarget
-  /**
-   * How to handle unavailable APIs at build time.
-   * - 'error'  : throw a build error (default)
-   * - 'warn'   : emit a warning and continue
-   * - 'ignore' : silently skip
-   */
+  /** Required extension manifest, or a factory receiving the browser target. */
+  manifest: WebExtensionManifest | ManifestFactory
+  /** How to handle unavailable browser APIs. Default: 'error'. Independent of staticTransform. */
   unavailableApi?: 'error' | 'warn' | 'ignore'
   /**
-   * Rewrite `browser.*` and `chrome.*` references to the active browser namespace.
-   * Defaults to true.
+   * Rewrite browser.* / chrome.* namespaces to the target browser. Default: true.
+   * This does not disable i18n or messaging helper transforms, or API validation.
    */
   staticTransform?: boolean
-  /** Backward-compatible alias for `staticTransform`. */
-  injectGlobals?: boolean
-  /**
-   * Manifest definition written to `manifest.json` during build.
-   * You can pass a plain object or a factory function per browser target.
-   */
-  manifest?: WebExtensionManifest | ManifestFactory
-  /**
-   * Generate source/dist zip artifacts under dist.
-   * Default: true
-   */
-  zipArtifacts?: boolean
-  /**
-   * Enable i18n helpers:
-   * - derive locale message id types from `src/locale/[localeName].ts` files exporting `defineLocale({...})`
-   * - statically rewrite `t(id)` to `browser.i18n.getMessage(id)`
-   *
-   * Default: disabled
-   */
+  /** Generate locale message types and transform i18n helpers. Default: disabled. */
   i18n?: boolean | I18nOptions
-  /**
-   * Scripts that are bundled as extension resources and can be injected from
-   * a content script with `injectScript(name)`.
-   */
+  /** Named scripts built as web-accessible resources for injectScript(name). */
   unlistedScripts?: UnlistedScripts
-  /** Convenience alias for configuring one or more unlisted scripts. */
-  unlistedScript?: string | UnlistedScripts
 }
 
 export { defineUnlistedScript, injectScript } from './inject-script.ts'
@@ -116,33 +91,37 @@ interface TransformPipelineResult {
 }
 
 export function webext(options: WebExtOptions): Plugin {
+  if (!options?.manifest) {
+    throw new Error('[vite-plugin-webext] webext({ manifest }) is required.')
+  }
   const {
     defaultBrowser,
-    browser,
+    manifest,
     unavailableApi = 'error',
     staticTransform = true,
-    injectGlobals,
-    manifest,
-    zipArtifacts = true,
     i18n,
-    unlistedScripts,
-    unlistedScript,
+    unlistedScripts = {},
   } = options
-  const configuredDefaultBrowser = resolveConfiguredDefaultBrowser(browser, defaultBrowser)
-  const shouldTransformNamespaces = injectGlobals ?? staticTransform
   const resolvedI18nOptions = resolveI18nOptions(i18n)
-  const configuredUnlistedScripts = resolveUnlistedScripts(unlistedScripts, unlistedScript)
+  const configuredUnlistedScripts = { ...unlistedScripts }
 
   let activeBrowser: BrowserTarget | null = null
-  let resolvedManifest: WebExtensionManifest | null = null
+  let sourceManifest: WebExtensionManifest
+  let automaticInputs: Record<string, string> = {}
+  let effectiveInputs: Record<string, string> = {}
   let localeMessageIds = new Set<string>()
   let localeEntries: LocaleEntryData[] = []
   let rootDir = process.cwd()
   let browserOutDir = path.resolve(rootDir, 'dist')
   let distRootDir = browserOutDir
   let viteManifestFileName = '.vite/manifest.json'
+  let watchedPublicDir = ''
   let isBuild = false
   let isZipMode = false
+  let writeBuild = true
+  let buildSourcemap: boolean | 'inline' | 'hidden' = false
+  let minifyScripts = false
+  let devWatcher: DevBuildWatcher | undefined
 
   function runTransformPipeline(pipeline: TransformPipelineContext): TransformPipelineResult | null {
     const { ctx, code, id, parse, magic, apiNamespace } = pipeline
@@ -183,8 +162,7 @@ export function webext(options: WebExtOptions): Plugin {
       transformedCodeForChecks = magic ? magic.toString() : messagingRewritten.code.toString()
     }
 
-    const hasNamespaceAccess = hasApiNamespaceAccess(transformedCodeForChecks)
-    if (!hasNamespaceAccess) {
+    if (!hasApiNamespaceAccess(transformedCodeForChecks)) {
       if (i18nRewriteCount === 0 && messagingRewriteCount === 0) return null
       if (magic) return { code: magic as unknown as string, map: null }
       return {
@@ -194,28 +172,19 @@ export function webext(options: WebExtOptions): Plugin {
     }
 
     const currentBrowser = requireBrowser(activeBrowser)
-    const unavailableApis =
-      currentBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
-
+    const unavailableApis = currentBrowser === 'chrome' ? FIREFOX_ONLY_APIS : CHROME_ONLY_APIS
     for (const api of unavailableApis) {
       if (!hasUnavailableApiAccess(transformedCodeForChecks, api)) continue
-
-      const message =
-        `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n` +
-        `  → ${id}`
-      if (unavailableApi === 'error') {
-        ctx.error(message)
-      } else if (unavailableApi === 'warn') {
-        ctx.warn(message)
-      }
+      const message = `[vite-plugin-webext] API "${api}" is not available in ${currentBrowser}.\n  → ${id}`
+      if (unavailableApi === 'error') ctx.error(message)
+      else if (unavailableApi === 'warn') ctx.warn(message)
     }
 
-    if (shouldTransformNamespaces) {
-      const targetNamespace = resolveApiNamespace(currentBrowser)
+    if (staticTransform) {
       const rewritten = rewriteApiNamespaces(
         magic ? code : transformedCodeForChecks,
         parse,
-        targetNamespace,
+        resolveApiNamespace(currentBrowser),
         magic ? { magicString: magic, returnMagicString: true } : {},
       )
       namespaceRewriteCount = rewritten.count
@@ -241,93 +210,89 @@ export function webext(options: WebExtOptions): Plugin {
     }
   }
 
-  return {
+  const plugin: Plugin = {
     name: 'vite-plugin-webext',
+    applyToEnvironment: (environment) => environment.name === 'client',
 
-    config(userConfig, configEnv): UserConfig {
-      isBuild = configEnv.command === 'build'
-      isZipMode = isBuild && isZipBuildMode(configEnv.mode)
-      activeBrowser = resolveBrowserTarget(configEnv.mode, configuredDefaultBrowser)
-      resolvedManifest = manifest
-        ? resolveUnlistedScriptManifest(
-            resolveManifest(manifest, activeBrowser),
-            Object.keys(configuredUnlistedScripts),
-          )
-        : null
-      const outDir = withBrowserSubDir(userConfig.build?.outDir ?? 'dist', activeBrowser)
-      const hasUnlistedScripts = Object.keys(configuredUnlistedScripts).length > 0
-      const configuredViteManifest = userConfig.build?.manifest
-
-      const currentRootDir = userConfig.root ? path.resolve(userConfig.root) : process.cwd()
-      const autoInputs = resolvedManifest
-        ? collectManifestInputs(resolvedManifest, currentRootDir)
-        : {}
-      const unlistedInputs = collectUnlistedScriptInputs(configuredUnlistedScripts, currentRootDir)
-
-      return {
-        define: {
+    config: {
+      order: 'post',
+      handler(config, env) {
+        isBuild = env.command === 'build'
+        isZipMode = isBuild && env.mode.endsWith('-zip') && parseBrowserMode(env.mode) !== null
+        activeBrowser = resolveBrowserTarget(env.mode, defaultBrowser)
+        rootDir = path.resolve(config.root ?? process.cwd())
+        sourceManifest = resolveUnlistedScriptManifest(
+          typeof manifest === 'function' ? manifest(activeBrowser) : manifest,
+          Object.keys(configuredUnlistedScripts),
+        )
+        config.define = {
+          ...config.define,
           'import.meta.env.BROWSER': JSON.stringify(activeBrowser),
           'import.meta.env.IS_FIREFOX': JSON.stringify(activeBrowser === 'firefox'),
           'import.meta.env.IS_CHROME': JSON.stringify(activeBrowser === 'chrome'),
-          'import.meta.env.WEBEXT_UNLISTED_SCRIPT_PATHS': hasUnlistedScripts
+          'import.meta.env.WEBEXT_UNLISTED_SCRIPT_PATHS': Object.keys(configuredUnlistedScripts).length
             ? UNLISTED_SCRIPT_PATHS_PLACEHOLDER
             : '{}',
-        },
-        build: {
-          outDir,
-          ...(hasUnlistedScripts
-            ? { manifest: typeof configuredViteManifest === 'string' ? configuredViteManifest : true }
-            : {}),
-          rolldownOptions: {
-            input: { ...autoInputs, ...unlistedInputs },
-          },
-        },
-      }
+        }
+        config.build ??= {}
+        config.build.outDir = withBrowserSubDir(config.build.outDir ?? 'dist', activeBrowser)
+        config.build.manifest = buildManifestOption(config.build.manifest)
+      },
     },
 
-    async configResolved(config) {
+    configEnvironment: {
+      order: 'post',
+      handler(name, config) {
+        if (name !== 'client') return
+        config.build ??= {}
+        config.build.manifest = buildManifestOption(config.build.manifest)
+        config.build.rolldownOptions ??= {}
+        if (Array.isArray(config.build.rolldownOptions.output)) {
+          throw new Error('[vite-plugin-webext] A single output is required; build.rolldownOptions.output cannot be an array. Build each browser separately with --mode.')
+        }
+        const scripts = collectUnlistedScriptInputs(configuredUnlistedScripts, rootDir)
+        automaticInputs = collectManifestInputs(sourceManifest, rootDir)
+        for (const [name, source] of Object.entries(scripts)) {
+          if (Object.hasOwn(automaticInputs, name) && automaticInputs[name] !== source) {
+            throw new Error(`[vite-plugin-webext] Unlisted script name "${name}" conflicts with a manifest entry.`)
+          }
+          automaticInputs[name] = source
+        }
+        effectiveInputs = mergeBuildInputs(
+          rootDir, automaticInputs, config.input, config.build.rolldownOptions.input,
+        )
+        // Use Vite's canonical input option. Do not deep-merge strings/arrays
+        // into a named object or leave a second input option shadowing it.
+        config.input = effectiveInputs
+        delete config.build.rolldownOptions.input
+      },
+    },
+
+    configResolved(config) {
       rootDir = config.root
-      activeBrowser = activeBrowser ?? resolveBrowserTarget(config.mode, configuredDefaultBrowser)
-      resolvedManifest = manifest
-        ? resolveUnlistedScriptManifest(
-            resolveManifest(manifest, activeBrowser),
-            Object.keys(configuredUnlistedScripts),
-          )
-        : null
-      browserOutDir = path.resolve(rootDir, config.build.outDir)
-      distRootDir = path.resolve(browserOutDir, '..')
-      if (Object.keys(configuredUnlistedScripts).length > 0 && !config.build.manifest) {
-        config.build.manifest = true
-      }
-      viteManifestFileName =
-        typeof config.build.manifest === 'string'
-          ? normalizePath(config.build.manifest)
-          : '.vite/manifest.json'
+      const build = config.environments.client!.build
+      browserOutDir = path.resolve(rootDir, build.outDir)
+      distRootDir = path.dirname(browserOutDir)
+      watchedPublicDir = build.watch && build.copyPublicDir ? config.publicDir : ''
+      viteManifestFileName = typeof build.manifest === 'string' ? normalizePath(build.manifest) : '.vite/manifest.json'
+      writeBuild = build.write
+      buildSourcemap = build.sourcemap
+      minifyScripts = !!build.minify
+    },
 
-      if (resolvedManifest) {
-        const autoInputs = collectManifestInputs(resolvedManifest, rootDir)
-        const unlistedInputs = collectUnlistedScriptInputs(configuredUnlistedScripts, rootDir)
-        const userInputs =
-          (config.build.rolldownOptions as { input?: Record<string, string> } | undefined)?.input ?? {}
-        const mergedInputs = { ...autoInputs, ...userInputs }
-        config.build.rolldownOptions = {
-          ...config.build.rolldownOptions,
-          input: { ...unlistedInputs, ...mergedInputs },
-        }
-      }
-
-      const hasContentScriptEntries = resolvedManifest?.content_scripts?.some(
-        (contentScript) => (contentScript.js?.length ?? 0) > 0,
+    async configureServer(server) {
+      devWatcher = await startDevBuild(server, plugin, () => webext(options))
+      server.config.logger.info(
+        `[vite-plugin-webext] Load ${browserOutDir} as an unpacked extension. ` +
+          'Changes are rebuilt automatically; reload the extension to apply them.',
       )
-      if (hasContentScriptEntries || Object.keys(configuredUnlistedScripts).length > 0) {
-        const rolldownOptions = (config.build.rolldownOptions ?? {}) as Record<string, unknown>
-        config.build.rolldownOptions = {
-          ...rolldownOptions,
-          output: disableCodeSplitting(rolldownOptions.output),
-        }
-      }
+    },
 
+    async buildStart() {
+      if (watchedPublicDir && await directoryExists(watchedPublicDir)) this.addWatchFile(watchedPublicDir)
+      // buildStart also runs for the dev server and for every watch rebuild.
       if (resolvedI18nOptions.enabled) {
+        this.addWatchFile(path.resolve(rootDir, resolvedI18nOptions.localeDir))
         const prepared = await prepareI18nArtifacts(rootDir, resolvedI18nOptions)
         localeMessageIds = prepared.messageIds
         localeEntries = prepared.localeEntries
@@ -336,50 +301,55 @@ export function webext(options: WebExtOptions): Plugin {
 
     generateBundle: {
       order: 'post',
-      handler(_, bundle) {
-        const outputBundle = bundle as OutputBundleLike
-        rewriteSourcePrefixedBundlePaths(outputBundle)
-
-        let manifestWithResolvedPaths =
-          manifest && resolvedManifest
-            ? resolveManifestPathsFromBundle(resolvedManifest, outputBundle, rootDir)
-            : null
-
-        if (Object.keys(configuredUnlistedScripts).length > 0) {
-          const unlistedOutputPaths = resolveUnlistedScriptOutputPaths(
-            outputBundle,
-            viteManifestFileName,
-            configuredUnlistedScripts,
-            rootDir,
-          )
-          if (manifestWithResolvedPaths) {
-            rewriteUnlistedScriptResourcePaths(manifestWithResolvedPaths, unlistedOutputPaths)
+      async handler(_, bundle) {
+        const viteManifest = readBuildManifest(bundle, viteManifestFileName)
+        const resolveOutput = createOutputPathResolver(viteManifest, rootDir, automaticInputs, effectiveInputs, bundle)
+        const scriptPaths = new Map<string, string>()
+        for (const [name, source] of Object.entries(configuredUnlistedScripts)) {
+          const output = resolveOutput(source)
+          if (bundle[output]?.type !== 'chunk') {
+            throw new Error(`[vite-plugin-webext] Could not resolve unlisted script "${name}" in the Vite build manifest.`)
           }
-          rewriteUnlistedScriptPathPlaceholder(outputBundle, unlistedOutputPaths)
+          scriptPaths.set(normalizeUnlistedScriptName(name), output)
         }
-
-        if (!manifest || !manifestWithResolvedPaths) return
-        if (outputBundle['manifest.json']) {
-          this.error(
-            '[vite-plugin-webext] `manifest.json` already exists in build output. Remove the duplicate or omit `webext({ manifest })`.',
-          )
-        }
-
-        resolvedManifest = manifestWithResolvedPaths
-
-        this.emitFile({
-          type: 'asset',
-          fileName: 'manifest.json',
-          source: `${JSON.stringify(manifestWithResolvedPaths, null, 2)}\n`,
+        const extensionManifest = resolveExtensionManifestPaths(sourceManifest, (source) => {
+          const name = source.endsWith('.js') ? source.slice(0, -3) : source
+          return scriptPaths.get(name) ?? resolveOutput(source)
         })
-
-        if (resolvedI18nOptions.enabled && localeEntries.length > 0) {
-          const messagesByLocale = transformLocaleEntriesToMessagesJson(localeEntries)
-          for (const [locale, messages] of Object.entries(messagesByLocale)) {
+        if (bundle['manifest.json']) {
+          this.error('[vite-plugin-webext] manifest.json is reserved for the extension manifest. Remove the duplicate output.')
+        }
+        this.emitFile({
+          type: 'asset', fileName: 'manifest.json', source: `${JSON.stringify(extensionManifest, null, 2)}\n`,
+        })
+        const replacement = JSON.stringify(Object.fromEntries(scriptPaths))
+        for (const output of Object.values(bundle)) {
+          if (output.type === 'chunk' && output.code.includes(UNLISTED_SCRIPT_PATHS_PLACEHOLDER)) {
+            output.code = output.code.replaceAll(UNLISTED_SCRIPT_PATHS_PLACEHOLDER, replacement)
+          }
+        }
+        const standalone = new Map<string, 'classic' | 'module'>([...scriptPaths.values()].map((file) => [file, 'module']))
+        for (const content of extensionManifest.content_scripts ?? []) {
+          for (const file of content.js ?? []) standalone.set(file, 'classic')
+        }
+        const background = extensionManifest.background
+        if (background && background.type !== 'module') {
+          if ('service_worker' in background) standalone.set(background.service_worker, 'classic')
+          else for (const file of background.scripts ?? []) standalone.set(file, 'classic')
+        }
+        await bundleStandaloneScripts(bundle, standalone, requireBrowser(activeBrowser), buildSourcemap, minifyScripts)
+        for (const entry of Object.values(viteManifest)) {
+          if (standalone.has(entry.file)) {
+            delete entry.imports
+            delete entry.dynamicImports
+          }
+        }
+        const manifestAsset = bundle[viteManifestFileName]!
+        if (manifestAsset.type === 'asset') manifestAsset.source = JSON.stringify(viteManifest, null, 2)
+        if (resolvedI18nOptions.enabled) {
+          for (const [locale, messages] of Object.entries(transformLocaleEntriesToMessagesJson(localeEntries))) {
             this.emitFile({
-              type: 'asset',
-              fileName: `_locales/${locale}/messages.json`,
-              source: `${JSON.stringify(messages, null, 2)}\n`,
+              type: 'asset', fileName: `_locales/${locale}/messages.json`, source: `${JSON.stringify(messages, null, 2)}\n`,
             })
           }
         }
@@ -388,431 +358,78 @@ export function webext(options: WebExtOptions): Plugin {
 
     transform(code, id, meta) {
       if (id.includes('node_modules')) return null
-
-      const apiNamespace = 'browser'
-
       const nativeMagicString = getNativeMagicString(meta)
       const result = runTransformPipeline({
-        ctx: this,
-        code,
-        id,
+        ctx: this, code, id,
         parse: (source) => this.parse(source),
         magic: nativeMagicString ?? undefined,
-        apiNamespace,
+        // Helpers always target native APIs, even when namespace rewriting is off.
+        apiNamespace: resolveApiNamespace(requireBrowser(activeBrowser)),
       })
-
       if (!result) return null
-      if (nativeMagicString) {
-        return { code: nativeMagicString as unknown as string, map: result.map }
-      }
-      return { code: result.code as string, map: result.map }
+      return { code: (nativeMagicString ?? result.code) as string, map: result.map }
+    },
+
+    async closeServer() {
+      await devWatcher?.close()
+      devWatcher = undefined
     },
 
     async closeBundle() {
-      if (!isBuild || !zipArtifacts || !isZipMode) return
-
-      const currentBrowser = requireBrowser(activeBrowser)
-      const versionResult = await resolveArtifactVersion(browserOutDir, resolvedManifest)
-      if (versionResult.source === 'fallback') {
-        this.warn(
-          `[vite-plugin-webext] Could not resolve manifest version for zip artifacts. Using fallback version "${versionResult.version}".`,
-        )
-      }
-
-      const version = sanitizeVersionForFileName(versionResult.version)
-      const sourceZipPath = path.join(distRootDir, `${currentBrowser}-${version}-source.zip`)
-      const distZipPath = path.join(distRootDir, `${currentBrowser}-${version}-dist.zip`)
-      const modeZipPath = path.join(distRootDir, `${currentBrowser}-zip.zip`)
-
-      await fs.mkdir(distRootDir, { recursive: true })
-      await createSourceZip(rootDir, sourceZipPath)
-      const hasBrowserOutput = await directoryExists(browserOutDir)
-      if (!hasBrowserOutput) {
-        this.warn(
-          `[vite-plugin-webext] Skipping dist zip artifacts because output directory "${browserOutDir}" does not exist. This can happen when \`build.write\` is disabled.`,
-        )
+      if (!isBuild || !isZipMode || !writeBuild) return
+      if (!await directoryExists(browserOutDir)) {
+        this.warn(`[vite-plugin-webext] Skipping zip artifacts because "${browserOutDir}" does not exist.`)
         return
       }
+      const currentBrowser = requireBrowser(activeBrowser)
+      const version = sourceManifest.version.replace(/[^A-Za-z0-9._-]/g, '_')
+      await fs.mkdir(distRootDir, { recursive: true })
+      const sourceZipPath = path.join(distRootDir, `${currentBrowser}-${version}-source.zip`)
+      const distZipPath = path.join(distRootDir, `${currentBrowser}-${version}-dist.zip`)
+      await createSourceZip(rootDir, sourceZipPath)
       await createDirectoryZip(browserOutDir, distZipPath)
-      await fs.copyFile(distZipPath, modeZipPath)
+      await fs.copyFile(distZipPath, path.join(distRootDir, `${currentBrowser}-zip.zip`))
     },
   }
+  return plugin
 }
 
-interface BundleChunkLike {
-  type: 'chunk'
-  fileName: string
-  code: string
-  imports: string[]
-  dynamicImports: string[]
-  implicitlyLoadedBefore: string[]
-  referencedFiles: string[]
-  isEntry?: boolean
-  facadeModuleId?: string | null
-}
-
-interface BundleAssetLike {
-  type: 'asset'
-  fileName: string
-  source?: string | Uint8Array
-  originalFileNames?: string[]
-  originalFileName?: string
-  names?: string[]
-  name?: string
-}
-
-type BundleOutputLike = BundleChunkLike | BundleAssetLike
-type OutputBundleLike = Record<string, BundleOutputLike>
-
-function resolveConfiguredDefaultBrowser(
-  browser?: BrowserTarget,
-  defaultBrowser?: BrowserTarget,
-): BrowserTarget | undefined {
-  if (!defaultBrowser) return browser
-  if (!browser || browser === defaultBrowser) return defaultBrowser
+function resolveBrowserTarget(mode: string, defaultBrowser?: BrowserTarget): BrowserTarget {
+  const target = parseBrowserMode(mode) ?? defaultBrowser
+  if (target) return target
   throw new Error(
-    '[vite-plugin-webext] `browser` and `defaultBrowser` are both set with different values. Use only one option, or set the same value for both.',
-  )
-}
-
-function resolveUnlistedScripts(
-  scripts: UnlistedScripts | undefined,
-  script: string | UnlistedScripts | undefined,
-): UnlistedScripts {
-  const resolved = { ...(scripts ?? {}) }
-  if (typeof script === 'string') {
-    resolved.main = script
-  } else if (script) {
-    Object.assign(resolved, script)
-  }
-  return resolved
-}
-
-function isZipBuildMode(mode: string): boolean {
-  return mode.endsWith('-zip') && parseBrowserMode(mode) !== null
-}
-
-function resolveBrowserTarget(mode: string, configuredBrowser?: BrowserTarget): BrowserTarget {
-  const browserFromMode = parseBrowserMode(mode)
-  if (browserFromMode) return browserFromMode
-  if (configuredBrowser) return configuredBrowser
-  throw new Error(
-    '[vite-plugin-webext] Could not resolve browser target. Use `vite build --mode chrome|firefox` or pass `webext({ defaultBrowser })` (or legacy `webext({ browser })`).',
+    '[vite-plugin-webext] Could not resolve browser target. Use --mode chrome|firefox or webext({ defaultBrowser, manifest }).',
   )
 }
 
 function parseBrowserMode(mode: string): BrowserTarget | null {
-  const browserMode = mode.endsWith('-zip') ? mode.slice(0, -'-zip'.length) : mode
-  if (browserMode === 'chrome' || browserMode === 'firefox') return browserMode
-  return null
+  const browser = mode.endsWith('-zip') ? mode.slice(0, -4) : mode
+  return browser === 'chrome' || browser === 'firefox' ? browser : null
 }
 
 function requireBrowser(browser: BrowserTarget | null): BrowserTarget {
-  if (!browser) {
-    throw new Error('[vite-plugin-webext] Browser target is not resolved.')
-  }
+  if (!browser) throw new Error('[vite-plugin-webext] Browser target is not resolved.')
   return browser
+}
+
+function buildManifestOption(option: boolean | string | undefined): true | string {
+  if (typeof option !== 'string') return true
+  if (path.posix.normalize(normalizePath(option)) === 'manifest.json') {
+    throw new Error('[vite-plugin-webext] build.manifest cannot be "manifest.json"; that path is reserved for the extension manifest.')
+  }
+  return option
 }
 
 function getNativeMagicString(meta: unknown): MagicStringLike | null {
   if (!meta || typeof meta !== 'object') return null
-  const magicString = (meta as { magicString?: unknown }).magicString
-  if (!magicString || typeof magicString !== 'object') return null
-
-  const candidate = magicString as Partial<MagicStringLike>
-  if (typeof candidate.overwrite !== 'function' || typeof candidate.toString !== 'function') {
-    return null
-  }
-
-  return candidate as MagicStringLike
+  const candidate = (meta as { magicString?: Partial<MagicStringLike> }).magicString
+  return candidate && typeof candidate.overwrite === 'function' && typeof candidate.toString === 'function'
+    ? candidate as MagicStringLike
+    : null
 }
 
 function withBrowserSubDir(outDir: string, browser: BrowserTarget): string {
-  if (path.basename(outDir) === browser) return outDir
-  return path.join(outDir, browser)
-}
-
-function disableCodeSplitting(output: unknown): unknown {
-  if (Array.isArray(output)) {
-    return output.map((options) => disableCodeSplitting(options))
-  }
-
-  return {
-    ...(output && typeof output === 'object' ? output : {}),
-    codeSplitting: false,
-  }
-}
-
-function resolveManifest(
-  manifest: WebExtensionManifest | ManifestFactory,
-  browser: BrowserTarget,
-): WebExtensionManifest {
-  return typeof manifest === 'function' ? manifest(browser) : manifest
-}
-
-function rewriteSourcePrefixedBundlePaths(bundle: OutputBundleLike) {
-  for (const output of Object.values(bundle)) {
-    const newFileName = stripLeadingSrcSegment(output.fileName)
-    output.fileName = newFileName
-  }
-
-  const renameMap = new Map<string, string>()
-  for (const output of Object.values(bundle)) {
-    renameMap.set(normalizePath(output.fileName), output.fileName)
-  }
-
-  for (const output of Object.values(bundle)) {
-    if (output.type !== 'chunk') continue
-    output.imports = rewriteReferencedFiles(output.imports, renameMap)
-    output.dynamicImports = rewriteReferencedFiles(output.dynamicImports, renameMap)
-    output.implicitlyLoadedBefore = rewriteReferencedFiles(output.implicitlyLoadedBefore, renameMap)
-    output.referencedFiles = rewriteReferencedFiles(output.referencedFiles, renameMap)
-  }
-}
-
-function rewriteReferencedFiles(
-  files: string[] | undefined,
-  renameMap: Map<string, string>,
-): string[] {
-  if (!files) return []
-  return files.map((fileName) => renameMap.get(normalizePath(fileName)) ?? fileName)
-}
-
-function stripLeadingSrcSegment(fileName: string): string {
-  const normalized = normalizePath(fileName)
-  if (!normalized.startsWith('src/')) return normalized
-  return normalized.slice('src/'.length)
-}
-
-function resolveManifestPathsFromBundle(
-  manifest: WebExtensionManifest,
-  bundle: OutputBundleLike,
-  rootDir: string,
-): WebExtensionManifest {
-  const sourceToOutput = buildSourceToOutputPathMap(bundle, rootDir)
-  return rewriteManifestPathLikeStrings(manifest, sourceToOutput)
-}
-
-interface ViteManifestEntryLike {
-  file?: unknown
-  name?: unknown
-  src?: unknown
-  isEntry?: unknown
-}
-
-function resolveUnlistedScriptOutputPaths(
-  bundle: OutputBundleLike,
-  manifestFileName: string,
-  scripts: UnlistedScripts,
-  rootDir: string,
-): Map<string, string> {
-  const manifestAsset = bundle[normalizePath(manifestFileName)]
-  if (!manifestAsset || manifestAsset.type !== 'asset' || manifestAsset.source == null) {
-    throw new Error(
-      `[vite-plugin-webext] Could not find Vite build manifest "${manifestFileName}". ` +
-        'Unlisted scripts require build.manifest to be enabled.',
-    )
-  }
-
-  const source =
-    typeof manifestAsset.source === 'string'
-      ? manifestAsset.source
-      : new TextDecoder().decode(manifestAsset.source)
-  const viteManifest = JSON.parse(source) as Record<string, ViteManifestEntryLike>
-  const entries = Object.values(viteManifest).filter((entry) => entry.isEntry === true)
-  const outputPaths = new Map<string, string>()
-
-  for (const [configuredName, sourcePath] of Object.entries(scripts)) {
-    const name = normalizeUnlistedScriptName(configuredName)
-    const normalizedSource = normalizeSourcePath(
-      path.relative(rootDir, path.resolve(rootDir, normalizePath(sourcePath).replace(/^\.\//, ''))),
-    )
-    const entry =
-      entries.find(
-        (candidate) =>
-          typeof candidate.src === 'string' &&
-          normalizeSourcePath(candidate.src) === normalizedSource,
-      ) ?? entries.find((candidate) => candidate.name === name)
-
-    if (!entry || typeof entry.file !== 'string') {
-      throw new Error(
-        `[vite-plugin-webext] Could not resolve the output for unlisted script "${configuredName}" ` +
-          `from Vite manifest "${manifestFileName}".`,
-      )
-    }
-
-    outputPaths.set(`${name}.js`, normalizePath(entry.file))
-  }
-
-  return outputPaths
-}
-
-function rewriteUnlistedScriptResourcePaths(
-  manifest: WebExtensionManifest,
-  outputPaths: Map<string, string>,
-) {
-  const resources = manifest.web_accessible_resources
-  if (!Array.isArray(resources)) return
-
-  const rewrite = (resource: string) => outputPaths.get(normalizePath(resource)) ?? resource
-  manifest.web_accessible_resources = resources.flatMap((entry) => {
-    if (typeof entry === 'string') return [rewrite(entry)]
-    return [{ ...entry, resources: entry.resources.map(rewrite) }]
-  })
-}
-
-function rewriteUnlistedScriptPathPlaceholder(
-  bundle: OutputBundleLike,
-  outputPaths: Map<string, string>,
-) {
-  const placeholder = UNLISTED_SCRIPT_PATHS_PLACEHOLDER
-  const scriptPaths = Object.fromEntries(
-    [...outputPaths].map(([resourceName, outputPath]) => [resourceName.replace(/\.js$/, ''), outputPath]),
-  )
-  const replacement = JSON.stringify(scriptPaths)
-
-  for (const output of Object.values(bundle)) {
-    if (output.type === 'chunk' && output.code.includes(placeholder)) {
-      output.code = output.code.replaceAll(placeholder, replacement)
-    }
-  }
-}
-
-function buildSourceToOutputPathMap(bundle: OutputBundleLike, rootDir: string): Map<string, string> {
-  const pathMap = new Map<string, string>()
-
-  for (const output of Object.values(bundle)) {
-    if (output.type === 'chunk') {
-      registerChunkPath(pathMap, output, rootDir)
-      continue
-    }
-    registerAssetPaths(pathMap, output, rootDir)
-  }
-
-  return pathMap
-}
-
-function registerChunkPath(pathMap: Map<string, string>, chunk: BundleChunkLike, rootDir: string) {
-  if (!chunk.isEntry || !chunk.facadeModuleId) return
-  const relativeSourcePath = normalizeSourcePath(path.relative(rootDir, chunk.facadeModuleId))
-  if (!relativeSourcePath || relativeSourcePath.startsWith('../')) return
-  if (relativeSourcePath.endsWith('.html')) return
-  setPathMapping(pathMap, relativeSourcePath, chunk.fileName)
-}
-
-function registerAssetPaths(pathMap: Map<string, string>, asset: BundleAssetLike, rootDir: string) {
-  for (const originalFileName of getAssetOriginalFileNames(asset)) {
-    const relativeSourcePath = normalizeSourcePath(
-      path.isAbsolute(originalFileName) ? path.relative(rootDir, originalFileName) : originalFileName,
-    )
-    if (!relativeSourcePath || relativeSourcePath.startsWith('../')) continue
-    setPathMapping(pathMap, relativeSourcePath, asset.fileName)
-  }
-}
-
-function getAssetOriginalFileNames(asset: BundleAssetLike): string[] {
-  const names: string[] = []
-  if (Array.isArray(asset.originalFileNames)) {
-    names.push(...asset.originalFileNames)
-  }
-  if (typeof asset.originalFileName === 'string') {
-    names.push(asset.originalFileName)
-  }
-
-  return names
-}
-
-function setPathMapping(pathMap: Map<string, string>, sourcePath: string, outputPath: string) {
-  const normalizedSource = normalizeSourcePath(sourcePath)
-  const normalizedOutput = normalizePath(outputPath)
-  if (!normalizedSource) return
-
-  pathMap.set(normalizedSource, normalizedOutput)
-  if (normalizedSource.startsWith('src/')) {
-    pathMap.set(normalizedSource.slice('src/'.length), normalizedOutput)
-  }
-}
-
-function rewriteManifestPathLikeStrings(
-  manifest: WebExtensionManifest,
-  sourceToOutput: Map<string, string>,
-): WebExtensionManifest {
-  const cloned = JSON.parse(JSON.stringify(manifest)) as unknown
-  return rewriteManifestValue(cloned, sourceToOutput) as WebExtensionManifest
-}
-
-function rewriteManifestValue(value: unknown, sourceToOutput: Map<string, string>): unknown {
-  if (Array.isArray(value)) {
-    return value.map((entry) => rewriteManifestValue(entry, sourceToOutput))
-  }
-  if (value && typeof value === 'object') {
-    const result: Record<string, unknown> = {}
-    for (const [key, childValue] of Object.entries(value)) {
-      result[key] = rewriteManifestValue(childValue, sourceToOutput)
-    }
-    return result
-  }
-  if (typeof value === 'string') {
-    return rewriteManifestPath(value, sourceToOutput)
-  }
-  return value
-}
-
-function rewriteManifestPath(value: string, sourceToOutput: Map<string, string>): string {
-  if (isExternalSpecifier(value)) return value
-
-  const normalized = normalizeSourcePath(value)
-  if (!normalized) return value
-
-  const mapped = sourceToOutput.get(normalized)
-  if (mapped) return mapped
-
-  if (normalized.startsWith('src/')) {
-    return normalized.slice('src/'.length)
-  }
-
-  return value
-}
-
-function isExternalSpecifier(value: string): boolean {
-  return /^[A-Za-z][A-Za-z\d+\-.]*:/.test(value) || value.startsWith('//')
-}
-
-function normalizeSourcePath(filePath: string): string {
-  const normalized = normalizePath(filePath)
-  return normalized.replace(/^\.\/+/, '').replace(/^\/+/, '')
-}
-
-function sanitizeVersionForFileName(version: string): string {
-  return version.replace(/[^A-Za-z0-9._-]/g, '_')
-}
-
-async function resolveArtifactVersion(
-  outDir: string,
-  manifest: WebExtensionManifest | null,
-): Promise<{ version: string; source: 'manifest-option' | 'manifest-file' | 'fallback' }> {
-  if (manifest?.version) {
-    return { version: manifest.version, source: 'manifest-option' }
-  }
-
-  const manifestPath = path.join(outDir, 'manifest.json')
-  try {
-    await fs.access(manifestPath)
-  } catch (error) {
-    const maybeError = error as NodeJS.ErrnoException
-    if (maybeError.code !== 'ENOENT') {
-      throw error
-    }
-    return { version: '0.0.0', source: 'fallback' }
-  }
-
-  const manifestRaw = await fs.readFile(manifestPath, 'utf8')
-  const parsed = JSON.parse(manifestRaw) as { version?: unknown }
-  if (typeof parsed.version === 'string' && parsed.version.trim()) {
-    return { version: parsed.version, source: 'manifest-file' }
-  }
-
-  return { version: '0.0.0', source: 'fallback' }
+  return path.basename(outDir) === browser ? outDir : path.join(outDir, browser)
 }
 
 async function createSourceZip(rootDirectory: string, outputPath: string) {
@@ -827,11 +444,9 @@ async function createDirectoryZip(directory: string, outputPath: string) {
 
 async function directoryExists(directory: string): Promise<boolean> {
   try {
-    const stat = await fs.stat(directory)
-    return stat.isDirectory()
+    return (await fs.stat(directory)).isDirectory()
   } catch (error) {
-    const maybeError = error as NodeJS.ErrnoException
-    if (maybeError.code === 'ENOENT') return false
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
     throw error
   }
 }
@@ -842,53 +457,29 @@ async function collectZipEntries(
   shouldInclude: (relativePath: string, isDirectory: boolean) => boolean,
 ): Promise<Array<{ name: string; data: Uint8Array<ArrayBuffer> }>> {
   const results: Array<{ name: string; data: Uint8Array<ArrayBuffer> }> = []
-  const entries = await fs.readdir(currentDirectory, { withFileTypes: true })
-
-  for (const entry of entries) {
+  for (const entry of await fs.readdir(currentDirectory, { withFileTypes: true })) {
     const absolutePath = path.join(currentDirectory, entry.name)
     const relativePath = path.relative(rootDirectory, absolutePath)
-    const include = shouldInclude(relativePath, entry.isDirectory())
-    if (!include) continue
-
+    if (!shouldInclude(relativePath, entry.isDirectory())) continue
     if (entry.isDirectory()) {
-      const nested = await collectZipEntries(rootDirectory, absolutePath, shouldInclude)
-      results.push(...nested)
-      continue
+      results.push(...await collectZipEntries(rootDirectory, absolutePath, shouldInclude))
+    } else if (entry.isFile()) {
+      const content = await fs.readFile(absolutePath)
+      results.push({ name: normalizePath(relativePath), data: new Uint8Array(content.buffer, content.byteOffset, content.byteLength) })
     }
-    if (!entry.isFile()) continue
-
-    const content = await fs.readFile(absolutePath)
-    const data = new Uint8Array(content.buffer, content.byteOffset, content.byteLength)
-    results.push({ name: toPosixPath(relativePath), data })
   }
-
   return results
 }
 
-async function writeZip(
-  outputPath: string,
-  entries: Array<{ name: string; data: Uint8Array<ArrayBuffer> }>,
-) {
+async function writeZip(outputPath: string, entries: Array<{ name: string; data: Uint8Array<ArrayBuffer> }>) {
   const writer = new Uint8ArrayWriter()
   const zipWriter = new ZipWriter(writer)
-  for (const entry of entries) {
-    await zipWriter.add(entry.name, new Uint8ArrayReader(entry.data))
-  }
-  const zipData = await zipWriter.close()
-  await fs.writeFile(outputPath, Buffer.from(zipData))
+  for (const entry of entries) await zipWriter.add(entry.name, new Uint8ArrayReader(entry.data))
+  await fs.writeFile(outputPath, Buffer.from(await zipWriter.close()))
 }
 
 function shouldIncludeSourceEntry(relativePath: string): boolean {
-  const segments = relativePath.split(path.sep)
-  return !segments.some(
-    (segment) =>
-      segment === 'node_modules' ||
-      segment === 'dist' ||
-      segment === '.git' ||
-      segment === '.copilot',
+  return !relativePath.split(path.sep).some((segment) =>
+    ['node_modules', 'dist', '.git', '.copilot'].includes(segment),
   )
-}
-
-function toPosixPath(filePath: string): string {
-  return normalizePath(filePath)
 }

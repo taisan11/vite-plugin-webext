@@ -13,6 +13,10 @@
 - ブラウザごとの出力ディレクトリ分離
 - `@zip.js/zip.js` を使った zip 生成
 
+対応する Vite は `^8.3.4` です。`manifest` は必須です。
+公開オプションは `manifest`、`defaultBrowser`、`staticTransform`、
+`unavailableApi`、`i18n`、`unlistedScripts` に整理しています。
+
 ## インストール
 
 ```bash
@@ -29,7 +33,26 @@ bunx @taisan11/vite-plugin-webext init .
 
 別のディレクトリに生成する場合は、`.` の代わりにディレクトリ名を指定します。既存ファイルは上書きしません。
 
-生成される `dev` は `vite build --watch` を使うため、開発中も常に `dist/chrome/` にビルド成果物を書き出します。Firefox 用は `bun run dev:firefox` を使ってください。
+生成される `dev` は `vite` を起動します。Firefox 用は `bun run dev:firefox` を使ってください。
+
+## `vite` による開発
+
+```bash
+vite                  # webext({ defaultBrowser }) の設定を使用
+vite --mode chrome
+vite --mode firefox
+```
+
+`webext({ manifest })` を設定すると、開発サーバーと同時に watch ビルドを起動します。
+初回ビルドの完了を待ってから起動し、変更時は manifest や public のファイルを含めて
+`dist/chrome/` / `dist/firefox/` を更新します。`build.outDir` の変更にも対応します。
+サーバー終了時にはビルドの監視も終了します。
+
+生成先を unpacked / 一時的な拡張機能としてブラウザに読み込んでください。
+変更後は拡張機能を再読み込みし、content script の場合は対象タブも再読み込みします。
+拡張機能の自動リロードや、インストール済み拡張機能内での HMR は提供しません。
+開発サーバーで直接開いた HTML では通常の Vite HMR が使えますが、拡張機能 API は使えません。
+従来の `vite build --watch` も引き続き利用できます。
 
 ## このパッケージのビルド（tsdown）
 
@@ -48,7 +71,7 @@ vite build --mode chrome
 vite build --mode firefox
 ```
 
-`webext({ defaultBrowser })` や `webext({ browser })` を併用しても、`--mode` が優先されます。
+ブラウザを指定する `--mode` は `defaultBrowser` より優先されます。
 
 ## `--mode` 未指定時のデフォルトブラウザ
 
@@ -56,11 +79,12 @@ vite build --mode firefox
 
 ```ts
 webext({
+  manifest, // 必須の manifest オブジェクト、またはファクトリ
   defaultBrowser: 'chrome',
 })
 ```
 
-`browser` は後方互換のため、`defaultBrowser` のエイリアスとして引き続き利用できます。
+旧 `browser` オプションは廃止しました。
 
 ## 基本設定
 
@@ -82,7 +106,7 @@ export default defineConfig({
 })
 ```
 
-`manifest` は以下を受け付けます。
+`manifest` は必須で、以下を受け付けます。
 
 - `WebExtensionManifest`
 - `(browser) => WebExtensionManifest`
@@ -105,7 +129,7 @@ webext({
 })
 ```
 
-content script から `injectScript('mainWorld')` を呼ぶと、`mainWorld.js` をページの main world に注入します。
+content script から `injectScript('mainWorld')` を呼ぶと、生成ファイルをページの main world に注入します。ハッシュを含む実際のファイル名は Vite の build manifest から解決します。単一スクリプトも `unlistedScripts: { main: 'src/main-world.ts' }` で指定します。
 
 未列挙スクリプト側では `defineUnlistedScript` に処理を渡せます。
 
@@ -125,7 +149,7 @@ await injectScript('mainWorld')
 
 `injectScript` は注入対象スクリプトを `web_accessible_resources` に自動登録します。未列挙スクリプトがあるビルドでは Vite の build manifest（既定 `.vite/manifest.json`）をビルド時に読み、ハッシュ付き出力ファイル名を Content Script に埋め込みます。Vite manifest 自体は WAR に登録しません。
 
-Content Script または未列挙スクリプトがあるビルドでは、ブラウザーが直接読み込めない分割チャンクへの依存を避けるため、Rolldown の code splitting を無効にします。その分、複数エントリー間で共有コードが重複して出力されることがあります。
+content script と未列挙スクリプトは、共有 JS import が残らないよう個別にバンドルします。HTML ページ側の code splitting は Vite に任せます。複数のスクリプト間で共有コードが重複する場合があります。
 
 ## `build.rolldownOptions.input` の設定例
 
@@ -151,7 +175,7 @@ export default defineConfig({
 })
 ```
 
-manifest にない追加エントリが必要な場合は `build.rolldownOptions.input` で指定します。自動収集分の上にユーザー入力がマージされ、ユーザーキーが優先されます。
+追加エントリは Vite のトップレベル `input` または `build.rolldownOptions.input` に、文字列・配列・名前付きオブジェクトで指定できます。名前付きのユーザー入力は自動収集分を上書きします。両方を指定した場合は `build.rolldownOptions.input` が優先されます。文字列・配列は同名の自動エントリを置き換えず追加されます。パスは Vite の root を基準に解決します。
 
 ```ts
 import { defineConfig } from 'vite'
@@ -178,7 +202,7 @@ export default defineConfig({
 - Firefox build では `browser.*` に変換します。
 - ランタイム shim は注入しません。
 
-静的変換はデフォルトで有効です。ソースの namespace をそのまま出力する場合は `staticTransform: false` を指定してください。後方互換のため `injectGlobals` もエイリアスとして利用できます。
+namespace の変換はデフォルトで有効です。`staticTransform: false` は namespace の変換だけを停止します。API の利用可否チェックと i18n・messaging のヘルパー変換は独立して動作し、ヘルパーは常に対象ブラウザのネイティブ API を使います。旧 `injectGlobals` オプションは廃止しました。
 
 Rolldown 側で `experimental.nativeMagicString: true` が有効な場合、このプラグインは利用可能な `meta.magicString` を自動利用します。利用できない環境では従来どおり JavaScript の `magic-string` にフォールバックします。
 
@@ -198,6 +222,7 @@ Rolldown 側で `experimental.nativeMagicString: true` が有効な場合、こ�
 
 ```ts
 webext({
+  manifest,
   i18n: true,
 })
 ```
@@ -236,6 +261,8 @@ const title = t('appTitle')
 ビルド時に `t('appTitle')` は静的に `browser.i18n.getMessage('appTitle')` へ置換され、`src/locale/*.ts` から id 型も自動導出されます。
 （`notificationContent.message` のようなネストキーは id として収集されず、`notificationContent` だけがメッセージ id になります。）
 
+`src/locale/webext-i18n.d.ts` は dev・本番ビルドの両方で生成し、locale の変更時にも更新します。内容が変わらなければファイルを書き直しません。
+
 ## messaging ヘルパー (`sendMessage`, `sendMessageToTab`)
 
 `WebextMessageMap` を拡張すると、リクエスト/レスポンスの型を定義できます。
@@ -262,12 +289,40 @@ await sendMessageToTab(1, 'getProfile', { userId: '42' })
 - `sendMessage(type, payload, options?)` → `browser.runtime.sendMessage({ type, payload }, options?)`
 - `sendMessageToTab(tabId, type, payload, options?)` → `browser.tabs.sendMessage(tabId, { type, payload }, options?)`
 
+## npm への公開（メンテナー向け）
+
+`v*` タグを push すると `.github/workflows/publish.yml` が実行されます。
+タグは `package.json` のバージョンに `v` を付けた値と一致する必要があります。
+Bun の frozen lockfile でインストールし、型チェック・テスト・ビルドが
+すべて成功した場合に provenance 付きで npm に公開します。
+
+初回のみ、npm の `@taisan11/vite-plugin-webext` の設定で GitHub Actions の
+Trusted Publisher を登録してください。
+
+- Owner: `taisan11`
+- Repository: `vite-plugin-webext`
+- Workflow filename: `publish.yml`
+- Environment: 空欄
+
+`NPM_TOKEN` シークレットは不要です。`package.json` を未公開の新バージョンに
+更新してコミットした後、そのコミットと一致するタグを push します。
+
+```bash
+git tag v<version>
+git push origin HEAD
+git push origin v<version>
+```
+
 ## 出力ディレクトリ
 
 ビルド成果物は以下に分離されます。
 
 - `dist/chrome/`
 - `dist/firefox/`
+
+Vite の build manifest は常に生成します（既定 `.vite/manifest.json`）。
+`build.manifest` の独自ファイル名も使えますが、`manifest.json` は拡張機能用に予約しています。
+出力ファイル名は変更せず、スクリプト・リソースは Vite manifest、HTML ページは出力アセットの情報からパスを解決します。
 
 ## zip 生成
 
@@ -283,6 +338,6 @@ Chrome の例:
 - `dist/chrome-1.2.3-dist.zip`
 - `dist/chrome-zip.zip`
 
-通常の `--mode chrome` / `--mode firefox` では zip は生成されません。`zipArtifacts: false` を指定すると `-zip` モードでも zip 生成を無効化できます。
-
-ブラウザ別の出力ディレクトリが存在しない場合（例: `build.write: false`）は、dist zip 生成を警告付きでスキップし、ビルドを失敗させません。
+ZIP 生成の切り替えは mode のみで行います。`zipArtifacts` オプションは廃止しました。
+通常の `--mode chrome` / `--mode firefox` では生成しません。
+`build.write: false` または出力ディレクトリが存在しない場合は ZIP を生成しません。

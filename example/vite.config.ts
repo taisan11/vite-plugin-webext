@@ -1,5 +1,5 @@
 import { defineConfig } from "vite"
-import { webext } from "../src"
+import { webext } from "../src/index.ts"
 
 export default defineConfig({
   plugins: [

@@ -8,6 +8,53 @@ bunx @taisan11/vite-plugin-webext init .
 
 **A simple Vite plugin to easily create lightweight extensions.**
 
+Requires Vite `^8.3.4`. Every `webext()` call must provide `manifest`.
+The supported options are `manifest`, `defaultBrowser`, `staticTransform`,
+`unavailableApi`, `i18n`, and `unlistedScripts`.
+
+## Publishing (maintainers)
+
+`.github/workflows/publish.yml` publishes to npm when a `v*` tag is pushed.
+The tag must exactly match `v` + the version in `package.json`. The workflow
+installs dependencies with Bun's frozen lockfile, typechecks, tests, and builds
+before publishing with provenance.
+
+Before the first automated release, configure a GitHub Actions trusted publisher
+in the npm settings for `@taisan11/vite-plugin-webext`:
+
+- Owner: `taisan11`
+- Repository: `vite-plugin-webext`
+- Workflow filename: `publish.yml`
+- Environment: leave blank
+
+No `NPM_TOKEN` secret is required. Update `package.json` to a new, unpublished
+version, commit it, and push that commit and its matching tag:
+
+```bash
+git tag v<version>
+git push origin HEAD
+git push origin v<version>
+```
+
+## Development with `vite`
+
+```bash
+vite                  # uses webext({ defaultBrowser })
+vite --mode chrome
+vite --mode firefox
+```
+
+With `webext({ manifest })`, the dev server also runs a watch build. It waits for
+an initial build, then keeps a loadable extension in `dist/chrome/` or
+`dist/firefox/` up to date, including the manifest and public assets. Custom
+`build.outDir` is supported. Stopping the dev server stops the build watcher.
+
+Load this folder as an unpacked/temporary extension. After changes, reload the
+extension (and affected tabs for content scripts). Automatic extension reload
+and HMR inside the installed extension are not provided. HTML pages opened via
+the Vite server still use normal Vite HMR, but do not have extension API access.
+`vite build --watch` remains supported.
+
 ## Browser target by `--mode`
 
 Use Vite mode to pick the browser:
@@ -17,7 +64,7 @@ vite build --mode chrome
 vite build --mode firefox
 ```
 
-If `webext({ defaultBrowser })` or `webext({ browser })` is also set, mode value takes precedence.
+Browser modes take precedence over `defaultBrowser`.
 
 ## Default browser without `--mode`
 
@@ -25,11 +72,12 @@ You can set a fallback browser when build mode is not `chrome` / `firefox`:
 
 ```ts
 webext({
+  manifest, // your required manifest object or factory
   defaultBrowser: 'chrome',
 })
 ```
 
-`browser` is still supported as a backward-compatible alias of `defaultBrowser`.
+The old `browser` option has been removed.
 
 ## Plugin usage
 
@@ -51,7 +99,7 @@ export default defineConfig({
 })
 ```
 
-`manifest` can be:
+`manifest` is required and can be:
 
 - `WebExtensionManifest`
 - `(browser) => WebExtensionManifest`
@@ -74,7 +122,7 @@ webext({
 })
 ```
 
-From a content script, call `injectScript('mainWorld')` to inject the generated `mainWorld.js` into the page's main world:
+From a content script, call `injectScript('mainWorld')` to inject the generated file into the page's main world. Its actual filename (including any hash) is resolved from Vite's build manifest:
 
 The unlisted script itself can use `defineUnlistedScript`:
 
@@ -93,6 +141,9 @@ await injectScript('mainWorld')
 ```
 
 The plugin automatically adds the configured scripts to `web_accessible_resources`.
+Use `unlistedScripts: { main: 'src/main-world.ts' }` even for a single script.
+Content scripts and unlisted scripts are bundled independently, without shared
+JS imports; HTML pages retain Vite's normal code splitting.
 
 ## `build.rolldownOptions.input` example
 
@@ -118,7 +169,11 @@ export default defineConfig({
 })
 ```
 
-To add extra inputs not declared in the manifest, pass them via `build.rolldownOptions.input`. User-provided inputs are merged on top of the auto-derived ones (user keys win):
+Extra inputs may be supplied through Vite's top-level `input` or
+`build.rolldownOptions.input`, as a string, array, or named object. Named user
+entries override automatic entries; `build.rolldownOptions.input` takes priority
+over top-level `input`. Strings and arrays add entries without replacing
+same-named automatic entries. All paths are resolved relative to Vite's root:
 
 ```ts
 import { defineConfig } from 'vite'
@@ -146,9 +201,10 @@ namespace references to the active browser target during the build:
 - Firefox builds use `browser.*`.
 - No runtime shim is injected.
 
-Static rewriting is enabled by default. Set `staticTransform: false` to keep
-the source namespace unchanged. The legacy `injectGlobals` option is accepted
-as an alias.
+Namespace rewriting is enabled by default. Set `staticTransform: false` to keep
+the source namespace unchanged. This does not disable API validation or the i18n
+and messaging helper transforms; helpers always target the selected browser's
+native API. The old `injectGlobals` option has been removed.
 
 When running on Rolldown with `experimental.nativeMagicString: true`, the plugin automatically uses the native `meta.magicString` object when it is available and falls back to the JavaScript `magic-string` package otherwise.
 
@@ -168,6 +224,7 @@ Enable i18n transform in plugin options:
 
 ```ts
 webext({
+  manifest,
   i18n: true,
 })
 ```
@@ -203,6 +260,8 @@ const title = t('appTitle')
 
 At build time, `t('appTitle')` is statically rewritten to `browser.i18n.getMessage('appTitle')`, and message id types are derived from `src/locale/*.ts`.
 Nested keys such as `notificationContent.message` are not collected as message ids; only top-level ids like `notificationContent` are collected.
+`src/locale/webext-i18n.d.ts` is generated in dev and production builds and refreshed
+on locale changes. An unchanged declaration is not rewritten.
 
 ## messaging helpers (`sendMessage`, `sendMessageToTab`)
 
@@ -237,6 +296,12 @@ Build output is placed under:
 - `dist/chrome/`
 - `dist/firefox/`
 
+Vite's build manifest is always generated (default `.vite/manifest.json`). A
+custom `build.manifest` filename is supported, except `manifest.json`, which is
+reserved for the extension manifest. Output filenames are never rewritten:
+script/resource paths are resolved from the Vite manifest and HTML page paths
+from emitted HTML assets.
+
 ## Zip artifacts
 
 When building with `--mode chrome-zip` or `--mode firefox-zip`, the plugin creates:
@@ -251,6 +316,6 @@ Example for chrome mode:
 - `dist/chrome-1.2.3-dist.zip`
 - `dist/chrome-zip.zip`
 
-Regular `--mode chrome` / `--mode firefox` builds do not generate zip files. Set `zipArtifacts: false` to disable zip generation even in a `-zip` mode.
-
-If the browser output directory is missing (for example, `build.write: false`), dist zip generation is skipped with a warning instead of failing the build.
+ZIP generation is controlled only by mode; there is no `zipArtifacts` option.
+Regular `--mode chrome` / `--mode firefox` builds do not generate ZIP files.
+ZIP artifacts are skipped when `build.write: false` or the output directory is missing.

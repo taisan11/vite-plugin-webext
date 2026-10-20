@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { collectUnlistedScriptInputs, resolveUnlistedScriptManifest } from '../utils/unlisted-scripts.ts'
 import { collectManifestInputs } from '../utils/manifest-inputs.ts'
@@ -6,7 +7,7 @@ import { injectScript } from '../inject-script.ts'
 describe('unlisted scripts', () => {
   it('creates named build inputs', () => {
     expect(collectUnlistedScriptInputs({ mainWorld: 'src/main-world.ts' }, '/project')).toEqual({
-      mainWorld: '/project/src/main-world.ts',
+      mainWorld: path.resolve('/project', 'src/main-world.ts'),
     })
   })
 
@@ -26,6 +27,15 @@ describe('unlisted scripts', () => {
     ])
   })
 
+  it.each([2, 3] as const)('keeps the MV%s resource format with an initially empty list', (version) => {
+    const manifest = resolveUnlistedScriptManifest({
+      manifest_version: version, name: 'test', version: '1.0.0', web_accessible_resources: [],
+    }, ['main'])
+    expect(manifest.web_accessible_resources).toEqual(version === 2
+      ? ['main.js']
+      : [{ resources: ['main.js'], matches: ['<all_urls>'] }])
+  })
+
   it('collects content script JavaScript as bundle inputs', () => {
     expect(
       collectManifestInputs(
@@ -37,7 +47,7 @@ describe('unlisted scripts', () => {
         },
         '/project',
       ),
-    ).toEqual({ 'content-0-0': '/project/src/content.ts' })
+    ).toEqual({ 'content-0-0': path.resolve('/project', 'src/content.ts') })
   })
 
   it('uses the Vite-manifest entry path embedded at build time', async () => {
