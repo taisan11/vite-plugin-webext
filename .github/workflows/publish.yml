@@ -27,8 +27,6 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
-      - name: Install npm with trusted publishing support
-        run: npm install --global npm@latest
       - name: Check release version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -39,4 +37,4 @@ jobs:
       - run: bun run test
       - run: bun run build
       - name: Publish
-        run: npm publish --provenance --access public
+        run: npm staged publish --provenance --access public
